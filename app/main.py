@@ -53,7 +53,8 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     def root():
-        return RedirectResponse(url="/ui/")
+        """根路径直接进控制台：访问 http://ip:8020/ 即可，不用记 /ui/console.html。"""
+        return RedirectResponse(url="/ui/console.html")
 
     return app
 
