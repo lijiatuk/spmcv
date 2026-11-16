@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     max_total_bytes: int = 80 * 1024 * 1024
     max_pixels: int = 50_000_000
     max_photos: int = 20
+    # 这个张数以内逐张串行分析，保证结果可复现；超过才并发。
+    # 实测并发会让 OCR 互相抢线程，出现「同样输入时好时坏」。
+    sequential_photos: int = 6
+    # 准入控制：并发满了快速返回 429，而不是排队到超时
+    admission_wait_s: float = 2.0
+    rate_limit_per_min: int = 120
 
     # 融合开关：关掉后只用 12 类场景头的结论，不做分组覆盖与动作头纠偏。
     # 用于 A/B——怀疑融合在部分场景上把对的改错了。
@@ -50,9 +56,11 @@ class Settings(BaseSettings):
 
     # 对外服务的 API Key，逗号分隔。为空则不校验（仅限内网演示）。
     # 单图分析硬超时（秒）。实时场景宁可降级返回 review，也不让上层干等。
-    # 单图分析硬超时。2s 是目标；这里留 3s 是给"宁可慢一点也要出结果"留余量，
-    # 部署到 L20 后可按实测下调。
-    request_deadline_s: float = 3.0
+    # 单图分析的**安全上限**（不是目标延迟）。
+    # 实测：单张行驶证 2.7s；两张并发互相抢 OCR 会到 5s+，所以上限给到 8s，
+    # 否则多图请求会整批降级成 TIMEOUT。产品目标是 P95 ≤ 2s，
+    # 那个要在 L20 上用 bench_api --max-p95-ms 2.0 实测后再收紧。
+    request_deadline_s: float = 8.0
 
     api_keys: str = ""
 
@@ -66,7 +74,7 @@ class Settings(BaseSettings):
     sso_pool_code: str = ""           # 每环境单独申请
     sso_user_base: str = ""           # /idaasweb 对应的用户中心网关
 
-    web_dir: Path = BASE_DIR / "app" / "static"
+    web_dir: Path = BASE_DIR / "web"   # 前端独立目录，与 app 同级
     config_path: Path = BASE_DIR / "app" / "scenes.json"
 
 

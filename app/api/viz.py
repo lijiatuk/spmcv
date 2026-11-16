@@ -8,9 +8,12 @@ import asyncio
 import csv
 import io
 import json
-from pathlib import Path
+from collections import Counter
+from datetime import datetime
+from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, HTTPException, Request
+import httpx
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.config import BASE_DIR, settings
@@ -452,6 +455,26 @@ def review_queue(source: str = "new", family: str = "oil",
                             "labeled": r["want"], "pred": r.get("got"),
                             "conf": r.get("conf"), "source": key, "correct": False})
 
+    # 新上传批次的自动标注结果也进队列：它们不在评测集里，但同样需要人工确认。
+    for r in feedback_store.list_auto_labels(limit=2000):
+        path = r.get("path") or ""
+        if not path or path in done:
+            continue
+        leaf = Path(path).parent.name          # 上传时按 slug 建目录，目录名就是原标签
+        if leaf not in SLUG_SET:
+            continue
+        if leaf not in fam:
+            continue
+        out.append({
+            "path": path,
+            "file": Path(path).name,
+            "folder": "upload:" + str(r.get("batch") or ""),
+            "labeled": leaf,
+            "pred": r.get("prediction"),
+            "conf": r.get("confidence"),
+            "source": "upload",
+        })
+
     if low_first:
         out.sort(key=lambda x: (x["conf"] if x["conf"] is not None else 1))
     return {
@@ -571,6 +594,10 @@ def _manifest_ok(version_dir: Path) -> tuple[bool, str]:
     for rel, meta in (man.get("files") or {}).items():
         f = version_dir / rel
         if not f.is_file():
+            # onnx 只在导出/离线评测时用，运行时只加载 .pt；
+            # 清理时删掉 onnx 不应挡住版本切换
+            if rel.startswith("onnx/"):
+                continue
             return False, f"{rel} 不存在"
         h = hashlib.sha256()
         with f.open("rb") as fh:
@@ -633,4 +660,291 @@ async def model_activate(payload: dict):
     from datetime import datetime
     reg["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     reg_path.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"active": name, "restart_required": True}
+
+    # 直接让 vision 服务热加载，不需要重启容器
+    reload_ok, reload_msg = False, ""
+    try:
+        r = await asyncio.to_thread(
+            httpx.post, f"{settings.vision_url.rstrip('/')}/v1/reload", timeout=120)
+        data = r.json() if r.status_code < 500 else {}
+        reload_ok = r.status_code == 200 and data.get("ok") is True
+        reload_msg = data.get("message") or ("" if reload_ok else f"HTTP {r.status_code}")
+    except Exception as exc:  # noqa: BLE001
+        reload_msg = f"{type(exc).__name__}: {exc}"
+
+    return {"active": name, "reloaded": reload_ok,
+            "restart_required": not reload_ok,
+            "message": "已生效" if reload_ok else f"已切换但热加载失败：{reload_msg}"}
+
+
+# ---------------- 数据集上传 + 自动标注 ----------------
+
+UPLOAD_ROOT = ROOT / "data/raw/uploads"
+# 上传的图要能被 /viz/api/file 读到、能被标注队列扫到，所以纳入白名单
+if UPLOAD_ROOT not in ALLOWED_ROOTS:
+    ALLOWED_ROOTS.append(UPLOAD_ROOT)
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024        # 2 GB
+MAX_ENTRIES = 20000
+NAME_TO_SLUG = {name: meta["slug"] for name, meta in CLASS_MAP.items()}
+SLUG_SET = set(NAME_TO_SLUG.values())
+
+
+def _safe_zip_name(name: str) -> str | None:
+    """防 zip-slip：只接受相对路径，不允许 ..、绝对路径、盘符。"""
+    p = PurePosixPath(name)
+    if p.is_absolute() or any(part in ("..", "") for part in p.parts):
+        return None
+    if p.suffix.lower() not in IMG_EXT:
+        return None
+    return "/".join(p.parts)
+
+
+def _class_of_member(rel: str) -> str | None:
+    """从 zip 内的相对路径推断类别：认目录名（中文名或 slug）。"""
+    parts = PurePosixPath(rel).parts[:-1]
+    for part in reversed(parts):
+        if part in NAME_TO_SLUG:
+            return NAME_TO_SLUG[part]
+        if part in SLUG_SET:
+            return part
+    return None
+
+
+@router.get("/viz/api/dataset/batches")
+def dataset_batches():
+    out = []
+    if UPLOAD_ROOT.is_dir():
+        for d in sorted(UPLOAD_ROOT.iterdir(), reverse=True):
+            meta = _load_json(d / "meta.json")
+            if meta:
+                out.append({**meta, "batch": d.name})
+    return {"batches": out}
+
+
+@router.post("/viz/api/dataset/upload")
+async def dataset_upload(file: UploadFile = File(...)):
+    """收一个 zip：目录名映射到 12 类，图片落盘到 data/raw/uploads/<batch>/<slug>/。
+
+    返回每个类的张数、无法归类的原因，供前端立刻看到"这批数据能不能用"。
+    """
+    import shutil
+    import zipfile
+
+    name = file.filename or "upload.zip"
+    if not name.lower().endswith(".zip"):
+        raise HTTPException(400, "只接受 zip（里面按类别建目录）")
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch = f"upload_{stamp}"
+    dest = UPLOAD_ROOT / batch
+    tmp = UPLOAD_ROOT / f".{batch}.zip"
+    UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
+    written = skipped_dir = skipped_type = 0
+    total = 0
+    try:
+        with tmp.open("wb") as fh:
+            while chunk := await file.read(1 << 20):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "压缩包超过 2GB")
+                fh.write(chunk)
+
+        counts: Counter = Counter()
+        unmapped: Counter = Counter()
+        with zipfile.ZipFile(tmp) as zf:
+            members = zf.infolist()
+            if len(members) > MAX_ENTRIES:
+                raise HTTPException(400, f"条目过多（{len(members)}）")
+            for info in members:
+                if info.is_dir():
+                    continue
+                rel = _safe_zip_name(info.filename)
+                if rel is None:
+                    skipped_type += 1
+                    continue
+                slug = _class_of_member(rel)
+                if slug is None:
+                    top = PurePosixPath(rel).parts[0] if len(PurePosixPath(rel).parts) > 1 else "（根目录）"
+                    unmapped[top] += 1
+                    continue
+                target = dest / slug / PurePosixPath(rel).name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, target.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+                counts[slug] += 1
+                written += 1
+    except zipfile.BadZipFile as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(400, "压缩包损坏") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    if written == 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(
+            400,
+            "没有可用的图片。zip 里请按类别建目录，例如 `01_桥放油/*.jpg` 或 `bridge_drain/*.jpg`")
+
+    meta = {
+        "batch": batch,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "original_name": name,
+        "images": written,
+        "bytes": total,
+        "classes": dict(counts),
+        "unmapped_top_dirs": dict(unmapped.most_common(10)),
+        "skipped": {"non_image": skipped_type},
+        "path": str(dest),
+    }
+    (dest / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
+
+
+@router.post("/viz/api/dataset/{batch}/autolabel")
+async def dataset_autolabel(batch: str, limit: int = 500):
+    """用当前模型给这批图打预标注，结果入库供人工复核。"""
+    if "/" in batch or batch.startswith("."):
+        raise HTTPException(400, "批次名非法")
+    dest = UPLOAD_ROOT / batch
+    if not dest.is_dir():
+        raise HTTPException(404, "批次不存在")
+
+    files = [p for p in sorted(dest.rglob("*")) if p.is_file() and p.suffix.lower() in IMG_EXT]
+    if not files:
+        raise HTTPException(400, "这批没有图片")
+    files = files[:max(1, min(limit, 2000))]
+
+    version = ""
+    try:
+        ready = httpx.get(f"{settings.vision_url}/healthz", timeout=5).json()
+        version = str(ready.get("model_version") or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    items, failed = [], 0
+    for p in files:
+        try:
+            with p.open("rb") as fh:
+                r = httpx.post(f"{settings.vision_url}/v1/scene",
+                               files={"image": (p.name, fh, "image/png")}, timeout=60)
+            # 404/503 也会返回 JSON，必须显式判状态码，否则会把空预测当成功写库
+            if r.status_code != 200:
+                failed += 1
+                continue
+            d = r.json()
+            label = d.get("class")
+            if not label:
+                failed += 1
+                continue
+            items.append({"path": str(p), "prediction": label,
+                          "confidence": d.get("confidence")})
+            version = version or str(d.get("model_version") or "")
+        except Exception:  # noqa: BLE001
+            failed += 1
+
+    saved = feedback_store.save_auto_labels(batch, items, version)
+    stats = feedback_store.auto_label_stats(batch)
+    return {"batch": batch, "saved": saved, "failed": failed,
+            "model_version": version, **stats}
+
+
+@router.post("/viz/api/model/delete")
+def model_delete(payload: dict):
+    """删除一个模型版本（登记 + 文件）。当前在用的版本不允许删。"""
+    import shutil
+
+    name = str(payload.get("version") or "").strip()
+    if not name or "/" in name or name.startswith("."):
+        raise HTTPException(400, "版本名非法")
+
+    reg_path = ROOT / "models/registry.json"
+    reg = _load_json(reg_path)
+    if name not in (reg.get("versions") or {}):
+        raise HTTPException(404, f"未注册的版本: {name}")
+
+    cur = ROOT / "models/current"
+    active = cur.resolve().name if cur.is_symlink() else None
+    if name == active:
+        raise HTTPException(400, "不能删除正在使用的版本，请先切到别的版本")
+
+    version_dir = ROOT / "models" / name
+    if version_dir.is_dir() and payload.get("delete_files", True):
+        shutil.rmtree(version_dir, ignore_errors=True)
+
+    reg["versions"].pop(name, None)
+    from datetime import datetime
+    reg["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    reg_path.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"deleted": name, "remaining": sorted(reg["versions"]),
+            "files_removed": bool(version_dir.is_dir() is False)}
+
+
+@router.post("/viz/api/model/register")
+def model_register(payload: dict):
+    """把一次训练产出的权重登记为候选版本（不自动上线）。
+
+    scene 头用新训练的，其余头沿用当前版本——避免把没重训的头一起换掉。
+    """
+    import hashlib
+    import shutil
+
+    version = str(payload.get("version") or "").strip()
+    weights = str(payload.get("weights") or "").strip()
+    if not version or "/" in version or version.startswith("."):
+        raise HTTPException(400, "版本名非法（不能含 /，不能以 . 开头）")
+    if not version.startswith("v") or "." not in version:
+        raise HTTPException(400, "版本名请用 vX.Y.Z 形式")
+    src = Path(weights)
+    if not src.is_file():
+        raise HTTPException(404, f"权重不存在: {weights}")
+
+    dest = ROOT / "models" / version
+    if dest.exists():
+        raise HTTPException(409, f"版本 {version} 已存在")
+    cur = ROOT / "models" / "current"
+    if not cur.is_dir():
+        raise HTTPException(500, "models/current 不可用")
+
+    (dest / "weights").mkdir(parents=True)
+    shutil.copy(src, dest / "weights" / "scene.pt")
+    for other in ("group.pt", "action.pt", "bin_axle.pt", "bin_tire.pt",
+                  "bin_filter.pt", "det.pt"):
+        s = cur / "weights" / other
+        if s.is_file():
+            shutil.copy(s, dest / "weights" / other)
+
+    files = {}
+    for p in sorted((dest / "weights").glob("*.pt")):
+        h = hashlib.sha256()
+        with p.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        files[f"weights/{p.name}"] = {"sha256": h.hexdigest(), "bytes": p.stat().st_size}
+
+    manifest = {
+        "model_version": version,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "roles": {"scene": "12 类场景分类", "group": "3 类油液分组", "action": "6 类动作",
+                  "bin_axle": "桥 加油/放油", "bin_tire": "轮胎 加油/放油",
+                  "bin_filter": "滤芯 有/无", "det": "18 类检测器"},
+        "source_dir": str(src),
+        "files": files,
+        "metrics": payload.get("metrics") or {},
+        "notes": str(payload.get("notes") or "由平台训练任务注册的候选版本"),
+    }
+    (dest / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                                        encoding="utf-8")
+
+    reg_path = ROOT / "models" / "registry.json"
+    reg = _load_json(reg_path)
+    reg.setdefault("versions", {})[version] = {
+        "status": "candidate",
+        "created_at": manifest["created_at"],
+        "n_files": len(files),
+        "metrics": manifest["metrics"],
+        "notes": manifest["notes"],
+    }
+    reg["updated_at"] = manifest["created_at"]
+    reg_path.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"registered": version, "status": "candidate", "files": len(files)}

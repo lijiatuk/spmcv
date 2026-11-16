@@ -59,6 +59,10 @@ lan:
 test:
 	$(PY) -m pytest tests -q
 
+## 接口契约检查：对运行中的服务验证对外契约（上层接入前必跑）
+contract-check:
+	$(PY) scripts/contract_check.py --photo "$${PHOTO:?用法: make contract-check PHOTO=路径}"
+
 ## 浏览器回归：真实 Chrome 点一遍控制台（需要服务已启动）
 ui-test:
 	node tools/ui_smoke.mjs

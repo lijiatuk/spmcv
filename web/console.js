@@ -39,8 +39,12 @@
   const loaded = new Set();
 
   /* ---------- 路由 ---------- */
+  let currentView = null;
+
   function go(view) {
     if (!TITLES[view]) view = "overview";
+    if (view === currentView) return;      // 避免 hashchange → go() → 改 hash 的递归
+    currentView = view;
     if (allowedViews && !allowedViews.has(view)) { showDeny(view); return; }
     document.querySelectorAll(".nav-item").forEach((a) =>
       a.classList.toggle("on", a.dataset.view === view));
@@ -52,9 +56,15 @@
     if (view === "dataset") loadDataset();
     if (view === "mistakes") { initTargetSelect(); loadMistakes(); }
     if (view === "label") { initBatchSelect(); loadLabelQueue(); }
-    if (view === "model") loadModelVersions();
+    if (view === "model") { initTrainPanel(); loadModelVersions(); pollTrain(); }
     if (view === "train") loadTrain();
   }
+  // 浏览器前进/后退、手改地址栏 hash 都要能切页
+  window.addEventListener("hashchange", () => {
+    const v = (location.hash || "#overview").slice(1);
+    if (v && v !== currentView) go(v);
+  });
+
   document.querySelector(".sidebar").addEventListener("click", (e) => {
     const a = e.target.closest(".nav-item");
     if (a) go(a.dataset.view);
@@ -217,7 +227,7 @@
     repair: { path: "/v1/repair", hint: "点击或拖入故障及修复照片", name: "故障及修复" },
     inspection: { path: "/v1/inspection", hint: "点击或拖入项目检查表照片", name: "项目检查表" },
   };
-  let cat = "arrival", files = [], scenes = [], urls = [], photoBoxes = [];
+  let cat = "arrival", files = [], scenes = [], urls = [], photoBoxes = [], photoFlags = [];
 
   $("catSeg").addEventListener("click", (e) => {
     const b = e.target.closest("button");
@@ -225,42 +235,57 @@
     cat = b.dataset.cat;
     [...$("catSeg").children].forEach((x) => x.classList.toggle("on", x === b));
     $("hint").textContent = CATS[cat].hint;
-    files = []; scenes = []; photoBoxes = []; drawPreview(); $("run").disabled = true; $("out").replaceChildren();
+    files = []; scenes = []; photoBoxes = []; activeIdx = 0;
+    drawPreview(); $("run").disabled = true; $("out").replaceChildren();
+    $("inferImgWrap").hidden = true; $("drop").classList.remove("compact");
   });
 
   function drawPreview() {
+    // 只负责把文件转成 objectURL 并释放旧的；缩略图条已按需求移除。
     urls.forEach((u) => URL.revokeObjectURL(u));
-    urls = [];
-    $("preview").replaceChildren();
-    files.forEach((f, i) => {
-      const url = URL.createObjectURL(f); urls.push(url);
-      const box = el("div", "shot");
-      box.style.cursor = "pointer";
-      const img = el("img"); img.src = url; img.alt = f.name;
-      const got = scenes[i];
-      const cap = el("span", "cap" + (got ? (got === "outside" ? " bad" : " ok") : ""),
-        got ? (got === "outside" ? "不在本类" : sname(got)) : "");
-      box.append(img, cap);
-      // 点缩略图 → 大图看标注，不再跳新标签页
-      box.addEventListener("click", () => {
-        viewer.open(
-          files.map((ff, k) => ({
-            src: urls[k], title: sname(scenes[k]) || "未识别", name: ff.name,
-            meta: [["场景", sname(scenes[k])], ["位置", `${k + 1} / ${files.length}`]],
-            idx: k,
-          })),
-          i,
-          (it) => photoBoxes[it.idx] || []
-        );
-      });
-      $("preview").append(box);
-    });
+    urls = files.map((f) => URL.createObjectURL(f));
+    if (activeIdx >= files.length) activeIdx = 0;
   }
+
+  let activeIdx = 0;
+
+  function showInferImage(i) {
+    const wrap = $("inferImgWrap");
+    if (!files.length) { wrap.hidden = true; $("drop").classList.remove("compact"); return; }
+    activeIdx = Math.max(0, Math.min(i, files.length - 1));
+    const img = $("inferImg");
+    img.src = urls[activeIdx] || "";
+    wrap.hidden = false;
+    $("drop").classList.add("compact");
+    $("hint").textContent = files.length > 1
+      ? `已选 ${files.length} 张 · 用两侧箭头切换查看`
+      : "已选 1 张 · 点「识别」开始，或再拖入更多照片";
+    $("inferCounter").textContent = files.length > 1 ? `${activeIdx + 1} / ${files.length}` : "";
+    $("inferPrev").hidden = files.length < 2 || activeIdx === 0;
+    $("inferNext").hidden = files.length < 2 || activeIdx >= files.length - 1;
+    $("inferBoxes").replaceChildren();
+    const boxes = photoBoxes[activeIdx] || [];
+    if (boxes.length) {
+      const paint = () => paintBoxesWhenReady($("inferBoxes"), boxes, img);
+      if (img.complete && img.naturalWidth) paint();
+      else img.addEventListener("load", paint, { once: true });
+    }
+  }
+
+  $("inferPrev").addEventListener("click", (e) => {
+    e.stopPropagation(); showInferImage(activeIdx - 1);
+  });
+  $("inferNext").addEventListener("click", (e) => {
+    e.stopPropagation(); showInferImage(activeIdx + 1);
+  });
 
   function setFiles(list) {
     files = Array.from(list).filter((f) => f.type.startsWith("image/"));
-    scenes = []; photoBoxes = []; $("files").value = "";
-    drawPreview(); $("run").disabled = files.length === 0; $("out").replaceChildren();
+    scenes = []; photoBoxes = []; activeIdx = 0;
+    $("files").value = "";
+    drawPreview(); $("run").disabled = files.length === 0;
+    $("out").replaceChildren();
+    showInferImage(0);
   }
   $("files").addEventListener("change", (e) => setFiles(e.target.files));
   const drop = $("drop");
@@ -279,19 +304,47 @@
 
   function renderResult(d) {
     const wrap = el("div", "card"); wrap.style.marginTop = "14px";
+    const insideN = (d.photos || []).length;
+    const outsideN = (d.unexpected || []).length;
     const head = el("div", "result-head");
-    head.append(el("div", "name", `${CATS[cat].name} · ${(d.photos || []).length} 张`),
-      el("span", "tag " + (d.ok ? "ok" : "warn"), d.ok ? "通过" : "复核"));
+    const name = el("div", "name",
+      `${CATS[cat].name} · 本类 ${insideN} 张` + (outsideN ? ` · 其他 ${outsideN} 张` : ""));
+    head.append(name, el("span", "tag " + (d.ok ? "ok" : "warn"), d.ok ? "通过" : "复核"));
     wrap.append(head);
+
+    if (d.degraded) {
+      wrap.append(el("div", "banner-warn", "部分照片分析超时，结果不完整；可重试或减少单次张数"));
+    }
 
     const seen = [...new Set((d.photos || []).map((p) => sname(p.scene)))].filter(Boolean);
     if (seen.length) wrap.append(el("div", "seen", "识别为：" + seen.join("、")));
 
     const s = el("div", "stats");
     if (cat === "arrival") {
-      s.append(stat("车牌", d.plate, { small: true }), stat("里程", d.odometer != null ? d.odometer + " km" : null),
-        stat("VIN", d.vin.match ? "一致" : (d.vin.license || d.vin.frame ? "不一致" : null),
-          { small: true, tone: d.vin.match ? "ok" : "warn" }));
+      const v = d.vin || {};
+      let vinText = null, vinTone;
+      if (v.license && v.frame) {
+        vinText = v.license === v.frame ? "一致" : "不一致";
+        vinTone = v.license === v.frame ? "ok" : "warn";
+      } else if (v.license) { vinText = "仅行驶证"; vinTone = "warn"; }
+      else if (v.frame) { vinText = "仅车架"; vinTone = "warn"; }
+      s.append(stat("车牌", d.plate, { small: true }),
+        stat("里程", d.odometer != null ? d.odometer + " km" : null),
+        stat("VIN", vinText, { small: true, tone: vinTone }));
+
+      if (v.license || v.frame || v.license_unverified || v.frame_unverified) {
+        const box = el("div", "vinbox");
+        const line = (k, val, bad) => {
+          if (!val) return;
+          const row = el("div", "vinrow");
+          row.append(el("span", null, k));
+          row.append(el("b", bad ? "bad" : "", val));
+          box.append(row);
+        };
+        line("行驶证", v.license || v.license_unverified, !v.license && v.license_unverified);
+        line("车架", v.frame || v.frame_unverified, !v.frame && v.frame_unverified);
+        wrap.append(box);
+      }
     } else if (cat === "repair") {
       const shot = (px) => (d.photos || []).some((p) => px.some((x) => (p.scene || "").startsWith(x)));
       const cell = (l, v, took) => v ? stat(l, v, { tone: "ok" })
@@ -326,6 +379,15 @@
           p.review_reasons.forEach((reason) => row.append(el("div", "photo-result-reason", reason)));
         }
         if (p.action) row.append(el("div", "meta", `动作：${p.action}`));
+        // OCR 原文：判断"没拍到"还是"拍到了没读对"的唯一依据
+        if (p.ocr_text) {
+          const ocr = el("details", "ocr-details");
+          ocr.append(el("summary", null, "OCR 原文"));
+          ocr.append(el("pre", "ocr-text", p.ocr_text));
+          row.append(ocr);
+        } else if (p.scene) {
+          row.append(el("div", "meta", "OCR 无输出（可能没有可读文字）"));
+        }
         if (p.model_version) row.append(el("div", "meta", `模型：${p.model_version}`));
         details.append(row);
       });
@@ -346,13 +408,18 @@
       const body = await api(CATS[cat].path + "?boxes=1", { method: "POST", body: fd });
       scenes = files.map(() => null);
       photoBoxes = files.map(() => []);
+      photoFlags = files.map(() => null);
       const outside = new Set((body.unexpected || []).map((p) => p.index));
       [...(body.photos || []), ...(body.unexpected || [])].forEach((p) => {
         if (typeof p.index !== "number") return;
         scenes[p.index] = outside.has(p.index) ? "outside" : p.scene;
         photoBoxes[p.index] = p.boxes || [];
+        photoFlags[p.index] = p.timed_out ? "timeout"
+          : (p.scene === "unknown_scene" || !p.scene) ? "unknown"
+          : outside.has(p.index) ? "outside" : null;
       });
       drawPreview();
+      showInferImage(0);
       $("out").replaceChildren(renderResult(body));
       $("out").scrollIntoView({ behavior: "smooth", block: "nearest" });
     } catch (err) {
@@ -398,7 +465,7 @@
       const hint = el("div", "kv");
       try {
         const boxes = await this.loadBoxes(it);
-        paintBoxes($("vBoxes"), boxes || [], img);
+        await paintBoxesWhenReady($("vBoxes"), boxes || [], img);
         hint.append(el("span", null, "检测框"),
                     el("b", null, boxes && boxes.length ? `${boxes.length} 个` : "未检测到"));
       } catch (err) {
@@ -430,135 +497,136 @@
   });
 
   /* ---------- 画框 ---------- */
+  // 图片刚插入时可能还没排版（rect.width=0），这时画框会静默失败。
+  // 等一帧再画，最多等 10 帧。
+  async function paintBoxesWhenReady(container, boxes, imgEl) {
+    for (let i = 0; i < 10; i++) {
+      const rect = imgEl.getBoundingClientRect();
+      if (rect.width > 0 && imgEl.naturalWidth > 0) {
+        paintBoxes(container, boxes, imgEl);
+        return true;
+      }
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    return false;
+  }
+
   function paintBoxes(container, boxes, imgEl) {
     container.replaceChildren();
     if (!boxes || !boxes.length) return;
     const nw = imgEl.naturalWidth, nh = imgEl.naturalHeight;
     const rect = imgEl.getBoundingClientRect();
-    if (!nw || !nh || !rect.width) return;
-    // 图片在容器里可能居中留白（object-fit: contain），必须减去偏移
+    if (!nw || !nh || !rect.width || !rect.height) return;
+
+    // object-fit: contain 会在元素内部留黑边，元素矩形 ≠ 图像实际绘制区域。
+    // 必须按等比缩放算出真正的显示尺寸，再把居中留白加回偏移，否则框会整体偏。
     const host = container.getBoundingClientRect();
-    const ox = rect.left - host.left;
-    const oy = rect.top - host.top;
-    const sx = rect.width / nw;
-    const sy = rect.height / nh;
+    const scale = Math.min(rect.width / nw, rect.height / nh);
+    const dispW = nw * scale;
+    const dispH = nh * scale;
+    const ox = (rect.left - host.left) + (rect.width - dispW) / 2;
+    const oy = (rect.top - host.top) + (rect.height - dispH) / 2;
+
     boxes.forEach((b) => {
       const [x1, y1, x2, y2] = b.box;
       const d = el("div", "bx");
-      d.style.left = `${ox + x1 * sx}px`;
-      d.style.top = `${oy + y1 * sy}px`;
-      d.style.width = `${(x2 - x1) * sx}px`;
-      d.style.height = `${(y2 - y1) * sy}px`;
-      d.append(el("span", null, `${b.label} ${b.score.toFixed(2)}`));
+      d.style.left = `${ox + x1 * scale}px`;
+      d.style.top = `${oy + y1 * scale}px`;
+      d.style.width = `${(x2 - x1) * scale}px`;
+      d.style.height = `${(y2 - y1) * scale}px`;
+      const tag = el("span", null, `${b.label} ${b.score.toFixed(2)}`);
+      // 框贴着上边缘时标签会被裁掉，改画在框内侧
+      if (oy + y1 * scale < 18) tag.style.top = "1px";
+      d.append(tag);
       container.append(d);
     });
   }
 
-  /* ---------- 数据集 ---------- */
-  const PAGE = 60;              // 一次只渲染 60 行，多的点"加载更多"
-  let dsCache = new Map();
-  let dsAll = [];               // 当前类的全部图片
-  let dsFiles = [];             // 过滤后的列表
-  let dsShown = 0;
-
-  function resetCards() {
-    const q = ($("q").value || "").trim().toLowerCase();
-    dsFiles = q ? dsAll.filter((f) => f.split("/").pop().toLowerCase().includes(q)) : dsAll.slice();
-    dsShown = 0;
-    $("cards").replaceChildren();
-    const old = $("cards").parentElement.querySelector(".more");
-    if (old) old.remove();
-    if (!dsFiles.length) {
-      $("cards").append(el("div", "meta", dsAll.length ? "没有匹配的文件" : "这个目录没有图片"));
-      return;
-    }
-    appendCards();
-  }
-
-  async function detectOf(path) {
-    if (!dsCache.has(path)) {
-      try { dsCache.set(path, (await api(`/viz/api/detect?path=${encodeURIComponent(path)}`)).boxes); }
-      catch { dsCache.set(path, []); }
-    }
-    return dsCache.get(path);
-  }
-
+  /* ---------- 数据集：上传 + 自动标注 ---------- */
   async function loadDataset() {
-    if (loaded.has("dataset")) return;
-    loaded.add("dataset");
-    const d = await api("/viz/api/classes");
-    const sel = $("root"); sel.replaceChildren();
-    (d.roots || []).forEach((r) => {
-      const o = el("option", null, r.split("/").slice(-1)[0]);
-      o.value = r; if (r === d.root) o.selected = true; sel.append(o);
-    });
-    renderClasses(d.classes);
-  }
+    const box = $("dsBatches");
+    const cnt = $("dsCount");
+    try {
+      const d = await api("/viz/api/dataset/batches");
+      const list = d.batches || [];
+      cnt.textContent = `共 ${list.length} 批`;
+      box.replaceChildren();
+      if (!list.length) {
+        box.append(el("div", "meta", "还没有上传过数据集。把按类别建好目录的 zip 拖到上面。"));
+        return;
+      }
+      list.forEach((b) => {
+        const card = el("div", "ds-batch");
+        const top = el("div", "top");
+        top.append(el("span", "name", b.batch),
+                   el("span", "when", (b.created_at || "").replace("T", " ").slice(0, 16)),
+                   el("span", "when", `${b.images} 张`));
+        const acts = el("div", "acts");
+        const stat = el("span", "batch-stat", "");
+        const btn = el("button", "ghost", "自动标注");
+        btn.addEventListener("click", async () => {
+          btn.disabled = true; btn.textContent = "标注中…";
+          try {
+            const r = await api(`/viz/api/dataset/${encodeURIComponent(b.batch)}/autolabel?limit=500`,
+              { method: "POST" });
+            stat.textContent = `已标 ${r.saved} 张，平均置信度 ${r.avg_confidence ?? "—"}，` +
+              `高置信 ${r.high_confidence}`;
+            btn.textContent = "重新标注";
+          } catch (err) {
+            stat.textContent = "失败：" + err.message;
+            btn.textContent = "自动标注";
+          } finally { btn.disabled = false; }
+        });
+        acts.append(stat, btn);
+        top.append(acts);
 
-  function renderClasses(classes) {
-    const box = $("classes"); box.replaceChildren();
-    classes.forEach((c) => {
-      const row = el("div", "cls");
-      row.append(el("span", null, c.name), el("span", null, String(c.count)));
-      row.addEventListener("click", async () => {
-        [...box.children].forEach((x) => x.classList.toggle("on", x === row));
-        $("clsTitle").textContent = `${c.name}`;
-        $("clsHint").textContent = `${c.count} 张 · 点任意一行查看大图与标注`;
-        const d = await api(`/viz/api/images?dir=${encodeURIComponent(c.path)}`);
-        dsAll = d.files;
-        $("q").value = "";
-        resetCards();
+        const dist = el("div", "dist");
+        Object.entries(b.classes || {}).forEach(([k, v]) => {
+          dist.append(el("span", "chip", `${sname(k)} ${v}`));
+        });
+        if (b.unmapped_top_dirs && Object.keys(b.unmapped_top_dirs).length) {
+          const bad = Object.entries(b.unmapped_top_dirs).map(([k, v]) => `${k}(${v})`).join("、");
+          dist.append(el("span", "chip", `未归类目录：${bad}`));
+        }
+        card.append(top, dist);
+        box.append(card);
       });
-      box.append(row);
-    });
-  }
-
-  function appendCards() {
-    const box = $("cards");
-    const slice = dsFiles.slice(dsShown, dsShown + PAGE);
-    slice.forEach((p, k) => {
-      const idx = dsShown + k;
-      const row = el("div", "card-row");
-      const img = el("img", "thumb-s");
-      img.loading = "lazy";
-      img.src = `/viz/api/file?path=${encodeURIComponent(p)}`;
-      const info = el("div", "info");
-      info.append(el("div", "line1", p.split("/").pop()), el("div", "line2", `第 ${idx + 1} 张`));
-      row.append(img, info, el("span", "go", "›"));
-      row.addEventListener("click", () => {
-        viewer.open(
-          dsFiles.map((path) => ({
-            src: `/viz/api/file?path=${encodeURIComponent(path)}`,
-            title: "数据集样本",
-            name: path.split("/").pop(),
-            meta: [["路径", path.replace(/^.*?\/data\//, "data/")]],
-            path,
-          })),
-          idx,
-          (it) => detectOf(it.path)
-        );
-      });
-      box.append(row);
-    });
-    dsShown += slice.length;
-
-    const old = box.parentElement.querySelector(".more");
-    if (old) old.remove();
-    if (dsShown < dsFiles.length) {
-      const more = el("div", "more");
-      const btn = el("button", null, `加载更多（还有 ${dsFiles.length - dsShown} 张）`);
-      btn.addEventListener("click", () => appendCards());
-      more.append(btn);
-      box.after(more);
+    } catch (err) {
+      box.replaceChildren(el("div", "meta", "加载失败：" + err.message));
     }
   }
 
-  $("q").addEventListener("input", () => { if (dsAll.length) resetCards(); });
-  $("root").addEventListener("change", async (e) => {
-    $("classes").replaceChildren(); $("cards").replaceChildren();
-    dsFiles = []; dsShown = 0;
-    const d = await api(`/viz/api/classes?root=${encodeURIComponent(e.target.value)}`);
-    renderClasses(d.classes);
+  async function uploadDataset(file) {
+    const out = $("dsResult");
+    out.replaceChildren(el("div", "meta", "上传中…"));
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/viz/api/dataset/upload", { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const dist = Object.entries(d.classes || {}).map(([k, v]) => `${sname(k)} ${v}`).join("、");
+      out.replaceChildren(el("div", "meta",
+        `已导入 ${d.images} 张（${(d.bytes / 1024 / 1024).toFixed(1)}MB）：${dist}`));
+      loadDataset();
+    } catch (err) {
+      out.replaceChildren(el("div", "meta", "上传失败：" + err.message));
+    }
+  }
+
+  $("dsFile").addEventListener("change", (e) => {
+    if (e.target.files[0]) uploadDataset(e.target.files[0]);
+  });
+  const dsDrop = $("dsDrop");
+  ["dragenter", "dragover"].forEach((t) => dsDrop.addEventListener(t, (e) => {
+    e.preventDefault(); dsDrop.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach((t) => dsDrop.addEventListener(t, (e) => {
+    e.preventDefault(); dsDrop.classList.remove("over");
+  }));
+  dsDrop.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f) uploadDataset(f);
   });
 
   /* ---------- 评测 ---------- */
@@ -657,56 +725,73 @@
       box.append(row);
     });
     $("mGrid").replaceChildren();
-    $("mTitle").textContent = `共 ${mData.total} 张误判，选一个分组`;
     $("mSave").disabled = true;
+    const first = (mData.groups || [])[0];
+    if (first) {
+      const firstRow = box.children[0];
+      if (firstRow) firstRow.classList.add("on");
+      $("mTitle").textContent = `共 ${mData.total} 张误判`;
+      openGroup(first);          // 默认展开最大的一组，避免右侧空白
+    } else {
+      $("mTitle").textContent = "没有误判样本";
+    }
   }
 
   function openGroup(g) {
     mGroup = g; selected = new Set();
     $("mSave").disabled = true; $("mRelabel").disabled = true;
     $("mTarget").value = g.want;
-    $("mTitle").textContent = `${sname(g.want)} → ${sname(g.got)} · ${g.n} 张`;
-    const grid = $("mGrid"); grid.replaceChildren();
+    $("mTitle").textContent = `${sname(g.want)} → ${sname(g.got)} · ${g.n} 张 · 平均置信度 ${g.avg_conf}`;
+
+    const grid = $("mGrid");
+    grid.replaceChildren();
+    grid.className = "lgrid";          // 复用标注页的卡片网格，避免窄列竖排文字
 
     g.items.forEach((it, idx) => {
-      const row = el("div", "card-row");
-      const thumb = el("img", "thumb-s");
-      thumb.loading = "lazy";
-      thumb.src = `/viz/api/file?path=${encodeURIComponent(it.path)}`;
+      const card = el("div", "lcard");
 
-      const info = el("div", "info");
-      info.append(el("div", "line1", it.file));
-      const l2 = el("div", "line2");
-      l2.append(el("span", "tag2 bad", `判成 ${sname(it.got)}`),
-                el("span", "tag2", `${(it.conf * 100).toFixed(0)}%`),
-                el("span", "tag2", `应为 ${sname(it.want)}`));
-      info.append(l2);
-
-      const chk = el("input"); chk.type = "checkbox";
-      chk.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (chk.checked) selected.add(it.path); else selected.delete(it.path);
-        row.style.borderColor = chk.checked ? "var(--accent)" : "";
-        $("mSave").disabled = selected.size === 0;
-        $("mRelabel").disabled = selected.size === 0;
-      });
-
-      row.append(thumb, info, chk);
-      row.addEventListener("click", () => {
+      const shot = el("div", "lshot");
+      const img = el("img");
+      img.loading = "lazy";
+      img.src = `/viz/api/file?path=${encodeURIComponent(it.path)}`;
+      const overlay = el("div", "boxes");
+      shot.append(img, overlay);
+      shot.addEventListener("click", () => {
+        detectOf(it.path).then((boxes) => paintBoxesWhenReady(overlay, boxes || [], img)).catch(() => {});
         viewer.open(
           g.items.map((x) => ({
             src: `/viz/api/file?path=${encodeURIComponent(x.path)}`,
             title: `应为 ${sname(x.want)}`,
             name: x.file,
-            meta: [["判定", sname(x.got)], ["置信度", `${(x.conf * 100).toFixed(1)}%`],
+            meta: [["判定", sname(x.got)], ["置信度", `${((x.conf ?? 0) * 100).toFixed(0)}%`],
                    ["目录", x.folder]],
             path: x.path,
           })),
           idx,
-          (x) => detectOf(x.path)
+          (x) => detectOf(x.path),
         );
       });
-      grid.append(row);
+
+      const body = el("div", "lbody");
+      body.append(el("div", "lname", it.file));
+
+      const row = el("div", "lrow");
+      const chk = el("input", "lpick");
+      chk.type = "checkbox";
+      chk.addEventListener("change", () => {
+        if (chk.checked) selected.add(it.path); else selected.delete(it.path);
+        card.classList.toggle("sel", chk.checked);
+        $("mSave").disabled = selected.size === 0;
+        $("mRelabel").disabled = selected.size === 0;
+      });
+      row.append(chk,
+        el("span", "lpred bad", `判成 ${sname(it.got)}`),
+        el("span", "lpred", `${((it.conf ?? 0) * 100).toFixed(0)}%`));
+      body.append(row);
+      body.append(el("div", "lname", `应为 ${sname(it.want)}`));
+
+      card.append(shot, body);
+      grid.append(card);
     });
   }
 
@@ -759,6 +844,21 @@
     [...$("mSource").children].forEach((x) => x.classList.toggle("on", x === b));
     mSource = b.dataset.src; loadMistakes();
   });
+
+  /* ---------- 检测框缓存（标注网格和大图共用） ---------- */
+  const boxCache = new Map();
+  async function detectOf(path) {
+    if (!path) return [];
+    if (!boxCache.has(path)) {
+      try {
+        const d = await api(`/viz/api/detect?path=${encodeURIComponent(path)}`);
+        boxCache.set(path, d.boxes || []);
+      } catch {
+        boxCache.set(path, []);
+      }
+    }
+    return boxCache.get(path);
+  }
 
   /* ---------- 标注网格 ---------- */
   const LABEL_CLASSES = [
@@ -857,8 +957,8 @@
         const o = card.querySelector(".boxes");
         const im = card.querySelector("img");
         detectOf(p).then((boxes) => {
-          if (im.complete && im.naturalWidth) paintBoxes(o, boxes || [], im);
-          else im.addEventListener("load", () => paintBoxes(o, boxes || [], im), { once: true });
+          if (im.complete && im.naturalWidth) paintBoxesWhenReady(o, boxes || [], im);
+          else im.addEventListener("load", () => paintBoxesWhenReady(o, boxes || [], im), { once: true });
         }).catch(() => {});
       });
     }, { rootMargin: "200px" });
@@ -881,6 +981,7 @@
     body.append(row);
 
     const edit = el("div", "lrow");
+    edit.append(el("span", "lhint", "原标签"));
     const sel = labelSelect(it.labeled);
     // 改了下拉立即写库，不用再点确认
     sel.addEventListener("change", () => saveOne(it, sel.value, box));
@@ -958,6 +1059,106 @@
     updateBatchBar();
   });
 
+  /* ---------- 训练 ---------- */
+  let trainTimer = null;
+
+  async function initTrainPanel() {
+    const sel = $("trData");
+    if (sel.options.length) return;
+    sel.append(new Option("合并数据集 fold0（推荐）", "union:0"));
+    try {
+      const d = await api("/viz/api/dataset/batches");
+      (d.batches || []).forEach((b) => {
+        sel.append(new Option(`上传批次 ${b.batch}（${b.images} 张）`, `upload:${b.batch}`));
+      });
+    } catch {}
+  }
+
+  function renderTrain(j) {
+    const box = $("trStatus");
+    if (!j) { box.replaceChildren(el("div", "meta", "还没有训练任务")); return; }
+    const pct = j.epochs ? Math.min(100, Math.round((j.epoch / j.epochs) * 100)) : 0;
+    const tone = j.status === "completed" ? "ok" : j.status === "failed" ? "warn" : "";
+    const head = el("div", null,
+      `状态：${j.status}　epoch ${j.epoch}/${j.epochs}` +
+      (j.top1 != null ? `　top1 ${(j.top1 * 100).toFixed(1)}%` : ""));
+    head.className = "meta " + tone;
+    const bar = el("div", "trainbar");
+    const fill = el("i"); fill.style.width = pct + "%"; bar.append(fill);
+    box.replaceChildren(head, bar);
+    if (j.error) box.append(el("div", "banner-warn", j.error));
+  }
+
+  async function pollTrain() {
+    try {
+      const d = await api("/viz/api/train/status");
+      if (!d.job) { renderTrain(null); return; }
+      renderTrain(d.job);
+      if (d.log_tail) {
+        const log = el("div", "trainlog", d.log_tail);
+        $("trStatus").append(log);
+      }
+      const running = d.running;
+      $("trStart").disabled = running;
+      $("trCancel").hidden = !running;
+      if (running) {
+        trainTimer = setTimeout(pollTrain, 2500);
+      } else if (d.job.status === "completed" && d.job.weights) {
+        const btn = el("button", "btn", "注册为候选版本");
+        btn.style.marginTop = "8px";
+        btn.addEventListener("click", async () => {
+          const ver = prompt("版本号（vX.Y.Z）", "v5.2.0");
+          if (!ver) return;
+          try {
+            await api("/viz/api/model/register", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ version: ver, weights: d.job.weights,
+                                     metrics: { scene: { top1: d.job.top1 } } }),
+            });
+            $("modelHint").textContent = `已注册 ${ver}（候选，可切换）`;
+            loadModelVersions();
+          } catch (err) { alert("注册失败：" + err.message); }
+        });
+        $("trStatus").append(btn);
+      }
+    } catch (err) {
+      renderTrain(null);
+    }
+  }
+
+  $("trStart").addEventListener("click", async () => {
+    const [kind, arg] = $("trData").value.split(":");
+    const body = {
+      dataset: kind === "union" ? "union" : `upload:${arg}`,
+      fold: kind === "union" ? Number(arg || 0) : 0,
+      epochs: Number($("trEpochs").value || 25),
+      imgsz: Number($("trImgsz").value || 512),
+    };
+    $("trStart").disabled = true;
+    try {
+      await api("/viz/api/train/start", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      clearTimeout(trainTimer);
+      pollTrain();
+    } catch (err) {
+      $("trStart").disabled = false;
+      alert("启动失败：" + err.message);
+    }
+  });
+
+  $("trCancel").addEventListener("click", async () => {
+    const d = await api("/viz/api/train/status").catch(() => null);
+    if (!d?.job) return;
+    await api("/viz/api/train/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: d.job.job_id }),
+    }).catch(() => {});
+    clearTimeout(trainTimer);
+    pollTrain();
+  });
+
   /* ---------- 模型版本 ---------- */
   async function loadModelVersions() {
     const box = $("modelTable");
@@ -971,7 +1172,8 @@
     }
     const t = el("table", "tbl");
     const hr = el("tr");
-    ["版本", "状态", "场景 top1", "创建时间", ""].forEach((x) => hr.append(el("th", null, x)));
+    ["版本", "状态", "场景 top1", "评测口径", "创建时间", ""].forEach((x) =>
+      hr.append(el("th", null, x)));
     const thead = el("thead"); thead.append(hr); t.append(thead);
     const tb = el("tbody");
     (d.versions || []).forEach((v) => {
@@ -981,19 +1183,25 @@
       st.append(el("span", "pill " + (v.active ? "ok" : ""), v.active ? "使用中" : (v.status || "—")));
       const top1 = v.metrics?.scene?.top1;
       const m = el("td", "num", top1 != null ? `${(top1 * 100).toFixed(2)}%` : "—");
+      const sc = v.metrics?.scene || {};
+      const scope = sc.note || (sc.val_n ? `单折 ${sc.val_n} 张` : "—");
+      const scopeTd = el("td", "num", scope);
+      scopeTd.title = "不同版本的评测集不同，数字不可直接横向比较";
       const when = el("td", "num", (v.created_at || "").replace("T", " ").slice(0, 16));
       const act = el("td");
       if (!v.active && v.exists) {
-        const btn = el("button", "ghost", "切换到此版本");
+        const btn = el("button", "ghost", "切换");
         btn.addEventListener("click", async () => {
-          if (!confirm(`把线上模型切到 ${v.version}？\n\n切换只改指针，需重启 vision 服务才生效。`)) return;
+          if (!confirm(`把线上模型切到 ${v.version}？\n\n切换会立即热加载，无需重启。`)) return;
           btn.disabled = true;
           try {
-            await api("/viz/api/model/activate", {
+            const r2 = await api("/viz/api/model/activate", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ version: v.version }),
-            });
-            $("modelHint").textContent = `已切到 ${v.version}，重启 vision 服务后生效`;
+            }).catch(() => null);
+            $("modelHint").textContent = r2?.reloaded
+              ? `已切到 ${v.version}，已生效`
+              : `已切到 ${v.version}，需重启 vision 服务`;
             loadModelVersions();
           } catch (err) {
             alert("切换失败：" + err.message);
@@ -1002,7 +1210,23 @@
         });
         act.append(btn);
       }
-      tr.append(name, st, m, when, act);
+      if (!v.active) {
+        const del = el("button", "ghost", "删除");
+        del.style.marginLeft = "6px";
+        del.addEventListener("click", async () => {
+          if (!confirm(`删除模型 ${v.version}？会同时删掉磁盘上的权重，不可恢复。`)) return;
+          try {
+            await api("/viz/api/model/delete", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ version: v.version }),
+            });
+            $("modelHint").textContent = `已删除 ${v.version}`;
+            loadModelVersions();
+          } catch (err) { alert("删除失败：" + err.message); }
+        });
+        act.append(del);
+      }
+      tr.append(name, st, m, scopeTd, when, act);
       tb.append(tr);
     });
     t.append(tb);
@@ -1075,6 +1299,18 @@
     if (who) $("svcText").textContent = who;
   }
 
+  // 侧边栏的模型信息属于全局，不能只在总览页更新——直接进识别页会一直显示"加载中"。
+  function loadModelFooter() {
+    api("/v1/meta").then((m) => {
+      const mm = m.model || {};
+      const v = mm.runtime_version || mm.configured_version;
+      const roles = (mm.configured_roles || []).length;
+      if (v) $("modelVersion").textContent = `模型 ${v}` + (roles ? ` · ${roles} 个头` : "");
+    }).catch(() => {
+      $("modelVersion").textContent = "模型信息不可用";
+    });
+  }
+
   (async function boot() {
     let me = null;
     try {
@@ -1086,6 +1322,7 @@
       }
     }
     applyMenus(me);
+    loadModelFooter();
     let start = (location.hash || "#overview").slice(1);
     if (allowedViews && !allowedViews.has(start)) {
       start = [...allowedViews][0] || "overview";

@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from app.services.fields import vin_checksum_ok
 from app.services.workorder import _norm, dedupe
 
@@ -64,7 +66,8 @@ def _action(item: dict | None) -> str | None:
     return ((item or {}).get("conclusion") or {}).get("action")
 
 
-def summarize_arrival(items: list[dict]) -> dict:
+def summarize_arrival(items: list[dict], expected_plate: str = "",
+                      expected_odometer: float | None = None) -> dict:
     """接车四件套：车牌、双 VIN、里程。"""
     plate_item = _first(items, "arrival_plate")
     lic = _first(items, "license_vin")
@@ -85,8 +88,11 @@ def summarize_arrival(items: list[dict]) -> dict:
         reasons.append(f"行驶证 VIN 校验位不通过（{raw_lic}），需人工核对")
     if bad_frame:
         reasons.append(f"车架 VIN 校验位不通过（{raw_frame}），需人工核对")
+    # 规格原文：「匹配到车头，未识别车牌号 → 跳过车牌号校验」——不阻断自动审核。
+    # 只有"连车头都没匹配到"才算接车照片不合格，由 hints 提示，不阻断。
+    hints: list[str] = []
     if not plate:
-        reasons.append("未识别到车牌")
+        hints.append("未识别到车牌，已按规格跳过车牌校验")
     if not vin_lic and not bad_lic:
         reasons.append("未识别到行驶证 VIN")
     if not vin_frame and not bad_frame:
@@ -95,6 +101,22 @@ def summarize_arrival(items: list[dict]) -> dict:
         reasons.append(f"VIN 不一致：{vin_lic} ≠ {vin_frame}")
     if odometer is None:
         reasons.append("未识别到里程")
+
+    # 规格：车牌与工单不一致 → 不进入自动审核
+    if plate and expected_plate:
+        want = re.sub(r"[^0-9A-Z\u4e00-\u9fa5]", "", expected_plate.upper())
+        got = re.sub(r"[^0-9A-Z\u4e00-\u9fa5]", "", plate.upper())
+        if want and got and want != got:
+            reasons.append(f"车牌与工单不一致：{plate} ≠ {expected_plate}")
+    # 规格：识别到里程需与工单填写里程比对，误差不超过 5%
+    if odometer is not None and expected_odometer:
+        try:
+            diff = abs(float(odometer) - float(expected_odometer)) / float(expected_odometer)
+        except (TypeError, ValueError, ZeroDivisionError):
+            diff = None
+        if diff is not None and diff > 0.05:
+            reasons.append(
+                f"里程与工单相差 {diff:.1%}（识别 {odometer}，工单 {expected_odometer}），超过 5%")
 
     # 两个 VIN 都在且一致才算"对上了"；只有一个时视为不完整
     vin_ok = bool(vin_lic and vin_frame and vin_lic == vin_frame)
@@ -111,6 +133,7 @@ def summarize_arrival(items: list[dict]) -> dict:
         "odometer": odometer,
         "present": present,
         "reasons": dedupe(reasons),
+        "hints": dedupe(hints),
     }
 
 
@@ -158,6 +181,12 @@ def summarize_repair(items: list[dict], axle_type: str = "") -> dict:
         reasons.append("汉德桥不做轮胎油液判定")
     if axle_type and axle_type != "hande" and filter_actions:
         reasons.append("非汉德桥不做滤芯判定")
+    # 规格：非汉德桥需同时存在「桥放油」和「桥加油」才算完整
+    if axle_type and axle_type != "hande" and axle_seen:
+        if "drain" not in axle_actions:
+            reasons.append("非汉德桥缺少桥放油照片")
+        if "fill" not in axle_actions:
+            reasons.append("非汉德桥缺少桥加油照片")
 
     present = [it.get("scene") for it in items
                if group_of(it) in ("axle_oil", "tire_oil", "filter")]

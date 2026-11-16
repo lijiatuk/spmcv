@@ -92,7 +92,7 @@ body {
 .kpi .v { font-size: 26px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .kpi .k { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
-.row { display: grid; grid-template-columns: 1.7fr 1fr; gap: 14px; }
+.row { display: grid; grid-template-columns: 1.7fr 1fr; gap: 14px; align-items: start; }
 .card {
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: var(--shadow); padding: 16px 18px;
@@ -323,4 +323,168 @@ button.ghost { background: #fff; color: var(--muted); border: 1px solid var(--li
 .batchbar {
   display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 10px;
   background: var(--accent-soft); border-radius: 9px; font-size: 13px; color: var(--accent);
+}
+
+/* ============================================================
+   设计系统 v2（2026-11-16）
+   参考 design-taste-frontend：一套尺度、等边距、克制动效、去掉模板味。
+   放在最后覆盖，避免改动原有结构选择器。
+   ============================================================ */
+:root {
+  /* 间距阶梯：只用这四个值，禁止随手写 7px/13px */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+  /* 字号阶梯 */
+  --t-xs: 11px; --t-sm: 12.5px; --t-md: 14px; --t-lg: 16px; --t-xl: 20px; --t-2xl: 27px;
+  /* 圆角与描边 */
+  --r-sm: 7px; --r-md: 10px; --r-lg: 14px;
+  --line: #e7ebf2;
+  --line-strong: #d6dde9;
+  --ink: #0d1526;
+  --muted: #65748b;
+  --accent: #1f6feb;
+  --accent-ink: #1450b8;
+  --accent-soft: #eef4ff;
+  --shadow-sm: 0 1px 2px rgba(13, 21, 38, .05);
+  --shadow-md: 0 6px 18px -12px rgba(13, 21, 38, .45);
+  --ease: cubic-bezier(.2, .7, .3, 1);
+}
+
+body { font-size: var(--t-md); letter-spacing: .005em; }
+
+/* 标题层级：紧字距 + 明确大小差 */
+.topbar h1 { font-size: var(--t-lg); font-weight: 650; letter-spacing: -.01em; }
+.card-head .t { font-size: var(--t-md); font-weight: 600; letter-spacing: -.005em; }
+.brand b { letter-spacing: -.01em; }
+
+/* 卡片：细线 + 极轻阴影，不再用大投影 */
+.card { border-radius: var(--r-lg); box-shadow: var(--shadow-sm); border: 1px solid var(--line); }
+.kpi { border-radius: var(--r-lg); box-shadow: var(--shadow-sm); }
+.kpi .v { font-size: var(--t-2xl); letter-spacing: -.02em; }
+.kpi .k { font-size: var(--t-sm); }
+
+/* 按钮：悬停抬 1px，按下回位（skill 的 micro-motion） */
+.btn {
+  border-radius: var(--r-md);
+  transition: transform .14s var(--ease), box-shadow .14s var(--ease), background .14s var(--ease);
+  box-shadow: var(--shadow-sm);
+}
+.btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); background: var(--accent-ink); }
+.btn:active { transform: translateY(0); box-shadow: none; }
+.btn:disabled { transform: none; box-shadow: none; }
+button.ghost, .more button {
+  border-radius: var(--r-md);
+  transition: border-color .14s var(--ease), color .14s var(--ease), background .14s var(--ease);
+}
+button.ghost:hover, .more button:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+/* 侧边导航：选中用左侧竖条 + 实底，不用整块高亮 */
+.nav-item {
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  margin-right: var(--s3);
+  transition: background .14s var(--ease), color .14s var(--ease);
+  border-left: 3px solid transparent;
+}
+.nav-item.on { background: var(--accent); border-left-color: #9cc0ff; border-radius: 0 var(--r-md) var(--r-md) 0; }
+.nav-item.on .ico { opacity: 1; }
+
+/* 表：行悬停、数字对齐、表头更轻 */
+table.tbl th { font-size: var(--t-xs); letter-spacing: .04em; text-transform: uppercase; }
+table.tbl td { padding: 9px var(--s2); }
+table.tbl tbody tr { transition: background .12s var(--ease); }
+
+/* 缩略图/卡片：悬停时图片轻微放大（1.02），不倾斜不轮播 */
+.lcard { transition: box-shadow .16s var(--ease), transform .16s var(--ease); }
+.lcard:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.lcard .lshot img { transition: transform .3s var(--ease); }
+.lcard:hover .lshot img { transform: scale(1.02); }
+.card-row { transition: border-color .14s var(--ease), box-shadow .16s var(--ease), transform .16s var(--ease); }
+.card-row:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+
+/* 键盘可访问：所有可聚焦控件都有清晰的 focus 环 */
+a:focus-visible, button:focus-visible, select:focus-visible,
+input:focus-visible, .nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* 空状态统一：一句话 + 一句下一步，不留空白大地 */
+.meta { font-size: var(--t-sm); color: var(--muted); }
+
+/* 数据集上传 */
+.ds-batch { border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 10px; }
+.ds-batch .top { display: flex; align-items: center; gap: 10px; }
+.ds-batch .name { font-size: 13px; font-weight: 600; }
+.ds-batch .when { font-size: 12px; color: var(--muted); }
+.ds-batch .dist { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ds-batch .chip { font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+                  background: #f1f5f9; color: var(--muted); }
+.ds-batch .acts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.ds-batch .batch-stat { font-size: 12px; color: var(--ok); }
+
+/* ---------- 在线识别：左图右结论 ---------- */
+.infer-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(340px, 1fr); gap: var(--s4); align-items: start; }
+.infer-left { display: flex; flex-direction: column; gap: var(--s3); }
+.infer-stage { position: relative; }
+.infer-img {
+  position: relative; background: transparent; border-radius: var(--r-md);
+  line-height: 0; overflow: hidden; display: flex; justify-content: center;
+}
+/* 让容器贴合图片本身的宽高比，不再用黑边把竖图撑满宽容器 */
+.infer-img img {
+  width: auto; max-width: 100%; max-height: 66vh;
+  object-fit: contain; display: block; border-radius: var(--r-md);
+}
+.infer-img .boxes { position: absolute; inset: 0; pointer-events: none; }
+#drop.compact { min-height: 64px; padding: var(--s3); }
+#drop.compact .plus { display: none; }
+.infer-right:empty { display: none; }
+.infer-right .card { margin-top: 0; }
+.preview .shot.on img { outline: 2px solid var(--accent); }
+@media (max-width: 1080px) {
+  .infer-grid { grid-template-columns: 1fr; }
+  .infer-img img { max-height: 44vh; }
+}
+.cap.warn { color: var(--warn); }
+.banner-warn { margin-top: 10px; padding: 8px 10px; border-radius: 8px;
+               background: var(--warn-soft); color: var(--warn); font-size: 12.5px; }
+
+/* VIN 明细 */
+.vinbox { margin-top: 10px; border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; }
+.vinrow { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; padding: 3px 0; }
+.vinrow > span { flex: 0 0 48px; color: var(--muted); }
+.vinrow > b { font-weight: 600; letter-spacing: .04em; font-variant-numeric: tabular-nums; }
+.vinrow > b.bad { color: var(--warn); text-decoration: line-through; text-decoration-thickness: 1px; }
+
+.nav-btn[hidden] { display: none; }
+
+/* OCR 原文 */
+.ocr-details { margin-top: 6px; }
+.ocr-details summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.ocr-text {
+  margin: 6px 0 0; padding: 8px 10px; max-height: 180px; overflow: auto;
+  background: #0f172a; color: #cbd5e1; border-radius: var(--r-sm);
+  font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-all;
+}
+#drop.compact {
+  min-height: 0; padding: 6px 2px; background: transparent;
+  border: 0; box-shadow: none; align-items: flex-start;
+}
+#drop.compact .hint { font-size: 12px; color: var(--muted); }
+.lhint { font-size: 11px; color: var(--muted); flex: 0 0 auto; }
+
+/* 训练面板 */
+.trainform { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.trainform label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.trainform select, .trainform input {
+  font: inherit; font-size: 13px; padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: var(--r-sm); background: #fff; min-width: 120px;
+}
+.trainstatus { margin-top: 12px; }
+.trainbar { height: 8px; background: #eef2f7; border-radius: 5px; overflow: hidden; margin: 6px 0; }
+.trainbar i { display: block; height: 100%; background: var(--accent); transition: width .3s var(--ease); }
+.trainlog {
+  margin-top: 8px; padding: 8px 10px; max-height: 150px; overflow: auto;
+  background: #0f172a; color: #cbd5e1; border-radius: var(--r-sm);
+  font-size: 11px; line-height: 1.5; white-space: pre-wrap;
 }

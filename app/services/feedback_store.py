@@ -54,6 +54,15 @@ class FeedbackStore:
                     reviewer TEXT NOT NULL DEFAULT '',
                     added_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS auto_labels (
+                    image_path TEXT PRIMARY KEY,
+                    batch TEXT NOT NULL DEFAULT '',
+                    prediction TEXT NOT NULL DEFAULT '',
+                    confidence REAL,
+                    model_version TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_auto_batch ON auto_labels(batch);
                 CREATE TABLE IF NOT EXISTS hard_cases (
                     path TEXT PRIMARY KEY,
                     want TEXT NOT NULL DEFAULT '',
@@ -263,6 +272,46 @@ class FeedbackStore:
     def list_hard_cases(self) -> list[dict]:
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM hard_cases ORDER BY added_at")]
+
+    def save_auto_labels(self, batch: str, items: list[dict], model_version: str = "") -> int:
+        """记录模型预标注结果。不覆盖人工结论，只做排队依据。"""
+        n = 0
+        now = self.now()
+        with self.connect() as db:
+            for it in items:
+                path = str(it.get("path") or "")
+                if not path:
+                    continue
+                db.execute("""INSERT INTO auto_labels(image_path,batch,prediction,confidence,model_version,created_at)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(image_path) DO UPDATE SET
+                    batch=excluded.batch, prediction=excluded.prediction,
+                    confidence=excluded.confidence, model_version=excluded.model_version,
+                    created_at=excluded.created_at""",
+                    (path, batch, str(it.get("prediction") or ""), it.get("confidence"),
+                     model_version, now))
+                n += 1
+        return n
+
+    def list_auto_labels(self, batch: str = "", limit: int = 2000) -> list[dict]:
+        sql = ("SELECT image_path AS path, batch, prediction, confidence, model_version, created_at "
+               "FROM auto_labels")
+        args: tuple = ()
+        if batch:
+            sql += " WHERE batch = ?"
+            args = (batch,)
+        sql += " ORDER BY confidence ASC LIMIT ?"
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(sql, (*args, max(1, min(limit, 5000))))]
+
+    def auto_label_stats(self, batch: str) -> dict:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) n, AVG(confidence) avg_conf, "
+                "SUM(CASE WHEN confidence >= 0.85 THEN 1 ELSE 0 END) hi "
+                "FROM auto_labels WHERE batch = ?", (batch,)).fetchone()
+        return {"labeled": row["n"] or 0,
+                "avg_confidence": round(row["avg_conf"], 4) if row["avg_conf"] else None,
+                "high_confidence": row["hi"] or 0}
 
     def import_legacy_plan(self, path: Path) -> None:
         if not path.is_file():

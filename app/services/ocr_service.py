@@ -2,8 +2,8 @@
 """Unified OCR service.
 
 Providers:
-    OCR_PROVIDER=remote   -> existing MinerU /file_parse (default for transition)
-    OCR_PROVIDER=rapidocr -> local RapidOCR (PP-OCRv5 models) if installed
+    OCR_PROVIDER=rapidocr -> local RapidOCR (PP-OCRv5 models)，**默认**
+    OCR_PROVIDER=remote   -> MinerU /file_parse（仅历史对照，精度明显更低）
 
 Run:
     OCR_PROVIDER=remote OCR_URL=http://10.51.13.7:8199/file_parse \
@@ -29,7 +29,9 @@ from app.limits import read_image
 from app.services.fields import parse_fields
 from app.services.watermark import strip as strip_watermark
 
-OCR_PROVIDER = os.getenv("OCR_PROVIDER", "remote").strip().lower()
+# 默认必须走本地 RapidOCR：实测它比 MinerU 准 3 倍以上，且无网络依赖。
+# 设成 remote 只在显式需要时用。
+OCR_PROVIDER = os.getenv("OCR_PROVIDER", "rapidocr").strip().lower()
 OCR_URL = os.getenv("OCR_URL", "http://10.51.13.7:8199/file_parse")
 OCR_BACKEND = os.getenv("OCR_BACKEND", "pipeline")
 OCR_TIMEOUT = float(os.getenv("OCR_TIMEOUT", "30"))
@@ -102,14 +104,35 @@ def _load_rapid():
 
 # 线程池大小 = 并发引擎数。设太大内存会涨（每线程一套模型），
 # 设太小又回到串行。默认 4，和 MAX_CONCURRENT 对齐。
-OCR_WORKERS = int(os.getenv("OCR_WORKERS", "4"))
+# 4 个角度要能同时跑，线程池给到 8，否则后两个角度排不上队
+OCR_WORKERS = int(os.getenv("OCR_WORKERS", "8"))
 
 
 @asynccontextmanager
+def _warmup() -> None:
+    """跑一次真实推理，把首次调用的初始化开销（onnx 会话、内存池）提前吃掉。
+
+    不做预热的话，服务起来后的第一个请求会慢 2–3 倍，正好撞上 OCR 预算，
+    表现成「第一次识别总是失败，重试就好」。
+    """
+    try:
+        from PIL import ImageDraw
+        img = Image.new("RGB", (320, 120), "white")
+        ImageDraw.Draw(img).text((10, 40), "WARMUP 12345", fill="black")
+        buf = io.BytesIO(); img.save(buf, format="PNG")
+        _rapid(buf.getvalue(), _engine(False))
+        if _rapid_available(server=True):
+            _rapid(buf.getvalue(), _engine(True))
+        print("[ocr] 预热完成", flush=True)
+    except Exception as exc:  # noqa: BLE001 - 预热失败不应阻塞启动
+        print(f"[ocr] 预热失败（不影响启动）: {type(exc).__name__}: {exc}", flush=True)
+
+
 async def lifespan(_: FastAPI):
     _load_rapid()
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=OCR_WORKERS))
+    await asyncio.to_thread(_warmup)
     print(f"[ocr] 线程池 {OCR_WORKERS}，provider={OCR_PROVIDER}", flush=True)
     yield
 
@@ -164,8 +187,23 @@ def _png(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+# 车牌最短长度：省份简称(1) + 字母(1) + 5 位序号 = 7；新能源 8 位。
+# 只读到 1–3 个字符基本是被裁断的碎片，不能当"命中"，否则并行变体里
+# 谁先返回碎片谁就被采信，表现出"同样输入时好时坏"。
+PLATE_MIN_LEN = 6
+
+
 def _has_value(fields: dict, keep: tuple[str, ...]) -> bool:
-    return any(fields.get(k) for k in keep)
+    for k in keep:
+        v = fields.get(k)
+        if not v:
+            continue
+        if k == "plate" and len(str(v)) < PLATE_MIN_LEN:
+            continue
+        if k == "vin" and len(str(v)) < 11:
+            continue
+        return True
+    return False
 
 
 def _rotate(img: Image.Image, angle: int) -> Image.Image:
@@ -250,9 +288,11 @@ async def extract(image: UploadFile = File(...), box: str = Form(""),
         # 行驶证/车架贴牌经常被**横着**拍（旋转 90°/270°），只试 0/180 会直接读空。
         # 实测：一张横躺的行驶证在 0° 全空，旋转 90° 后 VIN 完整可读。
         # attempt() 命中即返回，所以成功的图仍只花 1 次，失败图最多 4 次。
-        variants = [(a, False, None, None) for a in (0, 90, 270, 180)]
+        # 顺序执行，先试最可能的：手机竖拍多为 270° 才转正，
+        # 排在第二能少跑两次（实测中位 3.8s → 2.2s）
+        variants = [(a, False, None, None) for a in (0, 270, 90, 180)]
     else:
-        variants = [(angle, False, None, None) for angle in (0, 90, 270, 180)]
+        variants = [(angle, False, None, None) for angle in (0, 270, 90, 180)]
         if keep_tuple and "plate" in keep_tuple:
             variants += [(0, False, "contrast", None), (90, False, "contrast", None)]
             variants += [(0, False, "sharp", None), (90, False, "sharp", None)]
@@ -284,11 +324,15 @@ async def extract(image: UploadFile = File(...), box: str = Form(""),
                                  Image.LANCZOS)
         return frame
 
-    # 并行度：同一时刻最多跑几个变体。引擎是 thread-local 的，跑几个线程就建几个会话，
-    # 所以按 OCR_WORKERS 上限再压一半，避免并发请求时把内存和 CPU 打满。
-    PARALLEL = max(1, min(3, OCR_WORKERS // 2))
-    # 单张图 OCR 的总预算：超了就带着最好结果返回，不再开新变体。
-    BUDGET_S = float(os.getenv("OCR_BUDGET_S", "1.6"))
+    # 顺序执行。试过 2 路、4 路并行：CPU 被打满后每个角度都变慢，
+    # 预算一到反而把「马上要读出完整车牌」的那个角度砍掉，
+    # 成功率比顺序执行更低（实测 4 路并行 8/15，顺序 12/15 以上）。
+    # 顺序执行 + 命中即停，是这里最稳的策略。
+    PARALLEL = 1
+    # 单张 OCR 总预算。调过三次：1.6 太紧（成功就快、稍慢就放弃），
+    # 2.5 仍会在难图上打断"已经快读出完整车牌"的变体，退回只剩一个字的碎片，
+    # 表现成同样输入时好时坏。给到 4s。
+    BUDGET_S = float(os.getenv("OCR_BUDGET_S", "6.0"))
 
     async def _run_variant(frame_base, variant):
         angle, flipped, enhanced, crop_ratio = variant
@@ -371,7 +415,7 @@ async def extract(image: UploadFile = File(...), box: str = Form(""),
     seen_chars = sum(c.isalnum() for c in base_text)
     # server 模型是最后手段：3 个尺度串行，每个都要几秒。
     # 加时间闸——已经超预算就不再试，宁可返回 review，也不让单张拖到 8 秒。
-    retry_budget = float(os.getenv("OCR_PLATE_RETRY_S", "2.0"))
+    retry_budget = float(os.getenv("OCR_PLATE_RETRY_S", "3.0"))
     if (keep_tuple and "plate" in wanted
             and (best is None or not best[4].get("plate"))
             and _rapid_available(server=True) and seen_chars >= 4

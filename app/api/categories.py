@@ -39,6 +39,21 @@ from app.services.categories import (
 router = APIRouter(tags=["categories"])
 VISION = VisionClient(_settings.vision_url, _settings.scene_timeout, _settings.detect_timeout)
 
+# 一次上传 20 张时，如果 20 个分析同时跑，会互相抢 OCR/GPU，单张反而全部超时。
+# 用信号量把并发压在 MAX_CONCURRENT 内，让每张的耗时可控。
+# 2 而不是 4：实测 4 路并发时 OCR 线程池互相抢，单张从 2s 涨到 5s+，
+# 反而全部撞死线。压到 2 路，单张稳定在 3s 内。
+_ANALYZE_SLOTS = asyncio.Semaphore(max(1, min(2, _settings.max_concurrent)))
+
+# 这个张数以内完全串行：并发会让 OCR 抢线程，出现「同样的图有时读得出有时读不出」。
+# 控制台实际使用是 1–4 张，串行后每张 ~1s，总时长可接受且结果可复现。
+SEQUENTIAL_LIMIT = int(_settings.sequential_photos)
+
+
+async def _analyze_limited(raw: bytes, filename: str, **kw):
+    async with _ANALYZE_SLOTS:
+        return await analyze_with_deadline(raw, filename, **kw)
+
 
 async def _detect_boxes(raw: bytes, filename: str) -> list[dict]:
     """给前端画框用：返回检测器在这次请求里看到的框。"""
@@ -69,11 +84,24 @@ async def _collect(images: list[UploadFile], allowed: tuple[str, ...],
     start = time.time()
     metrics.start("workorder")
     try:
-        results = await asyncio.gather(*[
-            analyze_with_deadline(raw, upload.filename or "image.jpg",
-                          axle_type=axle_type, expected_action=expected_action)
+        # 少图（≤2 张）串行：并发会让 OCR 抢线程、超预算后静默放弃，
+        # 表现为「同样两张图，有时读出车牌有时读不出」——比慢更糟。
+        # 多图才并发，并用信号量限制。
+        jobs = [
+            (upload.filename or "image.jpg", raw)
             for upload, raw in zip(images, payloads)
-        ])
+        ]
+        if len(jobs) <= SEQUENTIAL_LIMIT:
+            results = []
+            for name, raw in jobs:
+                results.append(await analyze_with_deadline(
+                    raw, name, axle_type=axle_type, expected_action=expected_action))
+        else:
+            results = await asyncio.gather(*[
+                _analyze_limited(raw, name, axle_type=axle_type,
+                                 expected_action=expected_action)
+                for name, raw in jobs
+            ])
     except Exception:
         metrics.end((time.time() - start) * 1000, error=True, kind="workorder")
         raise
@@ -96,6 +124,8 @@ async def _collect(images: list[UploadFile], allowed: tuple[str, ...],
             # 逐图结论：调用方需要知道是哪张图驱动了最终判定
             "action": (res.get("conclusion") or {}).get("action"),
             "field_summary": res.get("fields") or {},
+            # OCR 原文（截断）：上层排查"没拍到"还是"拍到了没读对"时必需
+            "ocr_text": (res.get("evidence") or {}).get("ocr_text", "")[:400],
         }
         ocr_code = ocr_error_code(res.get("ocr_error"))
         if ocr_code:
@@ -123,10 +153,22 @@ def _briefs(items: list[dict]) -> list[dict]:
 
 
 @router.post("/arrival")
-async def arrival(images: list[UploadFile] = File(...), boxes: bool = False):
-    """接车照片：车牌、行驶证与车架 VIN、里程。`boxes=1` 时附带检测框供前端可视化。"""
+async def arrival(images: list[UploadFile] = File(...), boxes: bool = False,
+                  expected_plate: str = Form(""), expected_odometer: str = Form("")):
+    """接车照片：车牌、行驶证与车架 VIN、里程。
+
+    按规格支持工单比对：`expected_plate` 车牌一致性、`expected_odometer` 里程误差 ≤5%。
+    """
     inside, outside = await _collect(images, ARRIVAL_SCENES, with_boxes=boxes)
-    out = summarize_arrival(inside)
+    odo_expect = None
+    if str(expected_odometer).strip():
+        try:
+            odo_expect = float(expected_odometer)
+        except ValueError:
+            raise HTTPException(422, detail={"code": "INVALID_PARAMS",
+                                             "message": "expected_odometer 必须是数字"})
+    out = summarize_arrival(inside, expected_plate=expected_plate,
+                            expected_odometer=odo_expect)
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
     out["need_review"] = not out["ok"]
@@ -179,6 +221,10 @@ REASON_CODES = [
     ("车架 VIN 校验位不通过", "VIN_CHECKSUM_FAILED"),
     ("有 VIN 未通过校验位", "VIN_CHECKSUM_FAILED"),
     ("VIN 不一致", "VIN_MISMATCH"),
+    ("车牌与工单不一致", "PLATE_MISMATCH"),
+    ("里程与工单相差", "ODOMETER_MISMATCH"),
+    ("非汉德桥缺少桥放油", "MISSING_DRAIN_PHOTO"),
+    ("非汉德桥缺少桥加油", "MISSING_FILL_PHOTO"),
     ("未识别到里程", "MISSING_ODOMETER"),
     ("桥的加油/放油未判定", "OIL_VERDICT_MISSING"),
     ("汉德桥不应出现桥放油", "RULE_HANDE_DRAIN"),
@@ -245,6 +291,8 @@ async def scan(
     axle_type: str = Form(""),
     expected_action: str = Form(""),
     expected_vin: str = Form(""),
+    expected_plate: str = Form(""),
+    expected_odometer: str = Form(""),
     boxes: bool = False,
 ):
     """对外统一入口：1..N 张图 + 可选 category。
@@ -277,12 +325,16 @@ async def scan(
         "unexpected": [p["_brief"] for p in outside],
     }
 
-    if any(p.get("timed_out") for p in payload["photos"] + payload["unexpected"]):
-        payload.setdefault("reasons", []).insert(0, "分析超时，结果不完整")
-        payload["degraded"] = True
-
     if category == "arrival":
-        summary = summarize_arrival(inside)
+        odo_expect = None
+        if str(expected_odometer).strip():
+            try:
+                odo_expect = float(expected_odometer)
+            except ValueError:
+                raise HTTPException(422, detail={"code": "INVALID_PARAMS",
+                                                 "message": "expected_odometer 必须是数字"})
+        summary = summarize_arrival(inside, expected_plate=expected_plate,
+                                    expected_odometer=odo_expect)
         payload.update(summary)
         payload["decision"] = "pass" if summary["ok"] else "review"
     elif category == "repair":

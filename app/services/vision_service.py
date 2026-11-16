@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image, ImageOps
 
@@ -107,6 +108,9 @@ def _verify_manifest() -> None:
     for rel, meta in (data.get("files") or {}).items():
         path = os.path.join(MODEL_DIR, rel)
         if not os.path.isfile(path):
+            # onnx 只在导出时用，运行时不加载；缺失不算错误
+            if rel.startswith("onnx/"):
+                continue
             bad.append((rel, "缺失"))
             continue
         h = hashlib.sha256()
@@ -158,10 +162,23 @@ def _load_models():
 
 
 @asynccontextmanager
+def _warmup() -> None:
+    """预热各头，避免第一个请求承担初始化开销。"""
+    try:
+        import numpy as np
+        img = Image.fromarray(np.full((512, 512, 3), 128, dtype="uint8"))
+        if CLS_MODEL is not None:
+            _scene_sync(img)
+        print("[vision] 预热完成", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[vision] 预热失败（不影响启动）: {type(exc).__name__}: {exc}", flush=True)
+
+
 async def lifespan(_: FastAPI):
     _load_models()
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(max_workers=MAX_DECODE_WORKERS))
+    await asyncio.to_thread(_warmup)
     yield
 
 
@@ -322,3 +339,28 @@ async def detect(image: UploadFile = File(...), conf: float = 0.25):
             "box": [round(float(v), 1) for v in b.xyxy[0].tolist()],
         })
     return {"boxes": boxes}
+
+
+@app.post("/v1/reload")
+async def reload_models():
+    """重新加载当前 `models/current` 指向的权重（热切换）。
+
+    切换版本后无需重启容器：前端点「切换」→ 调这里 → 新权重立刻生效。
+    加载期间用各模型锁挡住推理请求，避免半加载状态被读到。
+    """
+    acquired = []
+    try:
+        for lock in LOCKS.values():
+            lock.acquire()
+            acquired.append(lock)
+        before = MODEL_VERSION
+        await asyncio.to_thread(_load_models)
+        return {"ok": True, "before": before, "after": MODEL_VERSION}
+    except Exception as exc:  # noqa: BLE001
+        # 加载失败不能让服务停在半死状态：保留旧权重继续服务
+        return JSONResponse(status_code=500,
+                            content={"ok": False,
+                                     "message": f"重新加载失败，仍使用 {before}: {exc}"})
+    finally:
+        for lock in reversed(acquired):
+            lock.release()

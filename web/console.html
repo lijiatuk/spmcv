@@ -20,7 +20,7 @@
       <a class="nav-item on" data-view="overview"><span class="ico">◧</span>总览</a>
       <a class="nav-item" data-view="infer"><span class="ico">▣</span>在线识别</a>
       <a class="nav-item" data-view="model"><span class="ico">◈</span>模型版本</a>
-      <a class="nav-item" data-view="dataset" hidden><span class="ico">▤</span>数据集</a>
+      <a class="nav-item" data-view="dataset"><span class="ico">▤</span>数据集</a>
     </div>
     <div class="nav-group">
       <i>质量</i>
@@ -59,41 +59,55 @@
         </div>
       </section>
 
-      <!-- 在线识别 -->
+      <!-- 在线识别：左图带框，右结论 -->
       <section class="view" id="view-infer" hidden>
-        <div class="infer-wrap">
-          <div class="seg" id="catSeg">
-            <button class="on" data-cat="arrival">接车照片</button>
-            <button data-cat="repair">故障及修复</button>
-            <button data-cat="inspection">项目检查表</button>
+        <div class="infer-grid">
+          <div class="infer-left">
+            <div class="seg" id="catSeg">
+              <button class="on" data-cat="arrival">接车照片</button>
+              <button data-cat="repair">故障及修复</button>
+              <button data-cat="inspection">项目检查表</button>
+            </div>
+
+            <div class="infer-stage" id="inferStage">
+              <div class="infer-img" id="inferImgWrap" hidden>
+                <img id="inferImg" alt="">
+                <div class="boxes" id="inferBoxes"></div>
+                <button class="nav-btn prev" id="inferPrev" title="上一张">‹</button>
+                <button class="nav-btn next" id="inferNext" title="下一张">›</button>
+                <span class="counter" id="inferCounter"></span>
+              </div>
+              <label class="drop" id="drop">
+                <input id="files" type="file" accept="image/*" multiple hidden>
+                <span class="plus">+</span>
+                <span class="hint" id="hint">点击或拖入接车照片</span>
+              </label>
+            </div>
+
+            <button class="btn" id="run" disabled>识别</button>
           </div>
-          <label class="drop" id="drop">
-            <input id="files" type="file" accept="image/*" multiple hidden>
-            <span class="plus">+</span>
-            <span class="hint" id="hint">点击或拖入接车照片</span>
-          </label>
-          <div class="preview" id="preview"></div>
-          <button class="btn" id="run" disabled>识别</button>
-          <div id="out"></div>
+
+          <div class="infer-right" id="out"></div>
         </div>
       </section>
 
-      <!-- 数据集 -->
+      <!-- 数据集：上传 + 自动标注 -->
       <section class="view" id="view-dataset" hidden>
-        <div class="ds-wrap">
-          <div class="card">
-            <select id="root" class="hint" style="width:100%;margin-bottom:8px;padding:4px"></select>
-            <div id="classes" class="classes"></div>
-          </div>
-          <div class="card">
-            <div class="card-head">
-              <span class="t" id="clsTitle">选择左侧类别</span>
-              <input id="q" placeholder="筛选文件名…" class="hint"
-                     style="width:180px;padding:5px 9px;border:1px solid var(--line);border-radius:8px">
-              <span class="hint" id="clsHint">点任意一行查看大图与标注</span>
-            </div>
-            <div id="cards" class="cards"></div>
-          </div>
+        <div class="card">
+          <div class="card-head"><span class="t">上传数据集</span>
+            <span class="hint">zip 内按类别建目录：01_桥放油/ 或 bridge_drain/</span></div>
+          <label class="drop" id="dsDrop">
+            <input id="dsFile" type="file" accept=".zip" hidden>
+            <span class="plus">+</span>
+            <span class="hint" id="dsHint">点击或拖入 zip（≤2GB），目录名会自动映射到 12 类</span>
+          </label>
+          <div id="dsResult"></div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-head"><span class="t">已上传批次</span>
+            <span class="hint" id="dsCount">—</span></div>
+          <div id="dsBatches"></div>
         </div>
       </section>
 
@@ -159,9 +173,28 @@
 
       <!-- 模型版本 -->
       <section class="view" id="view-model" hidden>
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-head"><span class="t">训练</span>
+            <span class="hint">训练会吃满 CPU/GPU，同一时间只跑一个任务</span></div>
+          <div class="trainform">
+            <label>数据
+              <select id="trData"></select>
+            </label>
+            <label>epochs
+              <input id="trEpochs" type="number" min="1" max="200" value="25">
+            </label>
+            <label>imgsz
+              <input id="trImgsz" type="number" min="256" max="1024" step="32" value="512">
+            </label>
+            <button class="btn" id="trStart">开始训练</button>
+            <button class="ghost" id="trCancel" hidden>取消</button>
+          </div>
+          <div id="trStatus" class="trainstatus"></div>
+        </div>
+
         <div class="card">
           <div class="card-head"><span class="t">模型版本</span>
-            <span class="hint" id="modelHint">切换后需重启 vision 服务生效</span></div>
+            <span class="hint" id="modelHint">切换后自动热加载，无需重启</span></div>
           <div id="modelTable"></div>
         </div>
       </section>

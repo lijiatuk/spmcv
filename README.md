@@ -17,18 +17,21 @@
 （PyPA 认为服务型项目没必要上 `src/`，少一层）：
 
 ```
+web/                        前端（独立目录，与 app 同级，可直接换框架）
+  console.html/css/js       控制台：总览 / 在线识别 / 模型版本 / 错误样本 / 标注
+  sso.js                    统一登录接入（默认关闭）
+  simple.html               极简单页（内部排查用）
+
 app/                        服务代码
-  main.py                    app factory + 静态前端
-  config.py metrics.py limits.py schemas.py scenes.json
-  api/                       analyze / workorder / categories / health
+  main.py                    app factory + 挂载 web/
+  config.py metrics.py limits.py obs.py sso.py scenes.json
+  api/                       analyze / workorder / categories / health / viz
   services/                  客户端 + 业务 + 两个推理服务（8016 / 8018）
-  static/                    极简单页（1 张=单图，多张=整单）
 
 data/                       数据（不进 git）
   raw/recut/                产品最新给的 743 张（六桶划分的输入）
   raw/legacy/               上一版的同一批图（留作对照）
   external/                 规格 Excel + 内嵌样例图（第三方来源）
-  processed/v3/             448 张纯清洗版
   processed/v5/             537 张 + 5 折 + cls/ + heads/
   splits/                   工单分组划分
 
@@ -37,7 +40,8 @@ docs/                       方案与报告（docs/reports/）
 deploy/                     Docker Compose + 三个 Dockerfile + nginx
 scripts/                    数据处理 / 训练 / 评测 / 模型管理
 tests/                      pytest
-var/                        运行产物：runs/ logs/ archive/（不进 git）
+var/                        运行产物：runs/ logs/ feedback.sqlite3（不进 git）
+attic/                      退役脚本（可回滚，确认无用后再删）
 ```
 
 > 历史实验产物（30+ 个旧 run、v3 数据集、归档数据）已于 2026-11-16 清理，
