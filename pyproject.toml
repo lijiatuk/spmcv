@@ -1,0 +1,36 @@
+[project]
+name = "spmcv"
+version = "0.1.0"
+description = "SPM work-order photo vision API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "python-multipart",
+  "httpx",
+  "pydantic-settings",
+  "ultralytics",
+  "torch",
+  "torchvision",
+  "rapidocr",
+  "onnxruntime",
+  "pillow",
+  "numpy",
+  "scikit-learn",
+  "joblib",
+  "pandas",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["data", "runs", "logs", "app/static"]

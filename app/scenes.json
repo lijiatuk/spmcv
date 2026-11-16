@@ -1,0 +1,21 @@
+{
+  "class_map": {
+    "01_车头及车牌号": {"slug": "arrival_plate", "scene": "arrival_plate", "group": "arrival"},
+    "02_行驶证VIN": {"slug": "license_vin", "scene": "license_vin", "group": "vin_doc"},
+    "03_车架贴牌VIN": {"slug": "frame_vin", "scene": "frame_vin", "group": "vin_frame"},
+    "04_里程表": {"slug": "odometer", "scene": "odometer", "group": "odometer"},
+    "01_桥放油": {"slug": "bridge_drain", "scene": "axle_oil", "action": "drain", "group": "axle_oil"},
+    "02_桥加油": {"slug": "bridge_fill", "scene": "axle_oil", "action": "fill", "group": "axle_oil"},
+    "03_轮胎放油": {"slug": "tire_drain", "scene": "tire_oil", "action": "drain", "group": "tire_oil"},
+    "04_轮胎加油": {"slug": "tire_fill", "scene": "tire_oil", "action": "fill", "group": "tire_oil"},
+    "05_无滤芯": {"slug": "filter_none", "scene": "filter", "filter_state": "none", "group": "filter"},
+    "06_有滤芯": {"slug": "filter_has", "scene": "filter", "filter_state": "has", "group": "filter"},
+    "01_服务单首页VIN": {"slug": "service_front", "scene": "service_front", "group": "service_doc"},
+    "02_服务单末页客户签字及服务站盖章": {"slug": "service_sign", "scene": "service_sign", "group": "service_sign"}
+  },
+  "services": {
+    "vision": "http://127.0.0.1:8016",
+    "vlx": "http://10.51.13.7:8013",
+    "ocr": "http://10.51.13.7:8199/file_parse"
+  }
+}

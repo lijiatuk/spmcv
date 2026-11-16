@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SPM 数据看板</title>
+<link rel="stylesheet" href="/ui/style.css">
+<link rel="stylesheet" href="/ui/viz.css">
+</head>
+<body class="viz">
+<header class="bar">
+  <span class="brand">SPM 数据看板</span>
+  <nav class="tabs" id="tabs">
+    <button class="tab on" data-view="dataset">数据集 / 标注</button>
+    <button class="tab" data-view="eval">评测</button>
+    <button class="tab" data-view="train">训练曲线</button>
+    <button class="tab" data-view="mistakes">错误样本</button>
+  </nav>
+  <a class="link" href="/ui/">← 识别演示</a>
+</header>
+
+<main class="viz-main">
+  <!-- 数据集 -->
+  <section id="view-dataset" class="view">
+    <aside class="side">
+      <select id="root" class="select"></select>
+      <div id="classes" class="classes"></div>
+    </aside>
+    <div class="content">
+      <div class="content-head">
+        <span id="clsTitle" class="title">选择左侧类别</span>
+        <label class="chk"><input type="checkbox" id="showBoxes" checked> 显示检测框</label>
+      </div>
+      <div id="grid" class="thumbs"></div>
+    </div>
+    <div id="detail" class="detail" hidden>
+      <div class="detail-head">
+        <span id="detailName" class="title"></span>
+        <button id="detailClose" class="ghost">关闭</button>
+      </div>
+      <div class="viewer">
+        <img id="detailImg" alt="">
+        <div id="detailBoxes" class="boxes"></div>
+      </div>
+      <div id="detailMeta" class="meta"></div>
+    </div>
+  </section>
+
+  <!-- 评测 -->
+  <section id="view-eval" class="view" hidden>
+    <div class="content wide">
+      <div id="evalBody" class="eval"></div>
+    </div>
+  </section>
+
+  <!-- 错误样本工作台 -->
+  <section id="view-mistakes" class="view" hidden>
+    <aside class="side">
+      <div class="seg" id="mSource">
+        <button class="on" data-src="all">全部</button>
+        <button data-src="new">新数据</button>
+        <button data-src="old">老数据</button>
+      </div>
+      <div id="mGroups" class="classes"></div>
+    </aside>
+    <div class="content">
+      <div class="content-head">
+        <span id="mTitle" class="title">选择左侧分组</span>
+        <div class="acts">
+          <button id="mSelectAll" class="ghost small">全选本组</button>
+          <button id="mSave" class="primary small" disabled>登记为难例</button>
+        </div>
+      </div>
+      <div id="mGrid" class="mistakes"></div>
+    </div>
+    <div id="mDetail" class="detail" hidden>
+      <div class="detail-head">
+        <span id="mDetailName" class="title"></span>
+        <button id="mDetailClose" class="ghost">关闭</button>
+      </div>
+      <div class="viewer">
+        <img id="mDetailImg" alt="">
+        <div id="mDetailBoxes" class="boxes"></div>
+      </div>
+      <div id="mDetailMeta" class="meta"></div>
+    </div>
+  </section>
+
+  <!-- 训练 -->
+  <section id="view-train" class="view" hidden>
+    <div class="content wide">
+      <div id="trainBody" class="train"></div>
+    </div>
+  </section>
+</main>
+<script src="/ui/viz.js"></script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+{
+  "updated_at": "2026-11-14T12:25:55+08:00",
+  "versions": {
+    "v5.0.0": {
+      "status": "retired",
+      "created_at": "2026-11-13T13:03:31+08:00",
+      "n_files": 13,
+      "metrics": {
+        "scene": {
+          "top1": 0.9533,
+          "top5": 1.0,
+          "auto_coverage": 0.9346,
+          "auto_precision": 0.98,
+          "val_n": 107
+        },
+        "group": {
+          "top1": 0.9556,
+          "top5": 1.0,
+          "auto_coverage": 0.8222,
+          "auto_precision": 0.973,
+          "val_n": 45
+        },
+        "action": {
+          "top1": 0.8889,
+          "top5": 1.0,
+          "auto_coverage": 0.7333,
+          "auto_precision": 0.9091,
+          "val_n": 45
+        },
+        "bin_axle": {
+          "top1": 1.0,
+          "top5": 1.0,
+          "auto_coverage": 0.8462,
+          "auto_precision": 1.0,
+          "val_n": 13
+        },
+        "bin_tire": {
+          "top1": 1.0,
+          "top5": 1.0,
+          "auto_coverage": 0.6842,
+          "auto_precision": 1.0,
+          "val_n": 19
+        },
+        "bin_filter": {
+          "top1": 1.0,
+          "top5": 1.0,
+          "auto_coverage": 0.9231,
+          "auto_precision": 1.0,
+          "val_n": 13
+        },
+        "scene_11n_ab": {
+          "top1": 0.9533,
+          "auto_precision": 0.97
+        }
+      },
+      "manifest_sha256": "7e8b2e9d20b81fc273d55c79667fe645fd2a9f609d502a213cef8bc0a9ac833b",
+      "source_dir": "runs/"
+    },
+    "v5.1.0": {
+      "status": "active",
+      "created_at": "2026-11-14T12:25:55+08:00",
+      "n_files": 7,
+      "metrics": {
+        "scene": {
+          "top1": 0.8709,
+          "top1_std": 0.028,
+          "top5": 0.996,
+          "val_n": 1306,
+          "note": "5 折折外（新旧混合分布），每折独立训练"
+        },
+        "scene_new_only": {
+          "top1": 0.822,
+          "std": 0.02,
+          "val_n": 759,
+          "note": "只统计折外的新数据"
+        }
+      },
+      "notes": "scene 头用合并数据重训；group/action/bin_* 未重训，仍是 v5.0.0 的权重"
+    }
+  }
+}

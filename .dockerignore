@@ -1,0 +1,12 @@
+# 只打包代码与配置，数据/权重/产物都不进镜像
+data
+var
+docs
+tests
+models
+.env
+*.pt
+__pycache__
+.pytest_cache
+.cache
+.ruff_cache

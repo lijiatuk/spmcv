@@ -1,0 +1,60 @@
+{
+  "model_version": "v5.1.0",
+  "created_at": "2026-11-14T12:25:55+08:00",
+  "roles": {
+    "scene": "12 类场景分类",
+    "group": "3 类油液分组",
+    "action": "6 类动作",
+    "bin_axle": "桥 加油/放油",
+    "bin_tire": "轮胎 加油/放油",
+    "bin_filter": "滤芯 有/无",
+    "det": "18 类检测器"
+  },
+  "source_dir": "var/runs/union_scene_f0（scene 头） + models/v5.0.0（其余头）",
+  "files": {
+    "weights/action.pt": {
+      "sha256": "8908276221de0d87e4103860ad2c898df3bfc04a918a9c751a1106b3779932a3",
+      "bytes": 3198466
+    },
+    "weights/bin_axle.pt": {
+      "sha256": "1949d27b305dedddf9b5c57e7c1dbcb80886af6ddd706981607c541b3d976dd0",
+      "bytes": 3187330
+    },
+    "weights/bin_filter.pt": {
+      "sha256": "a08a0b2325276056f9cfb99c3c5b64697e515cab571a04fd8a07d6ba6b85106a",
+      "bytes": 3186754
+    },
+    "weights/bin_tire.pt": {
+      "sha256": "7ee00659c0532f9bff5eef9a7dad4391e2566c50da08c0eed7fa3ba54d06bc7d",
+      "bytes": 3186498
+    },
+    "weights/det.pt": {
+      "sha256": "fd7a5ebbdf20350e07fd6aed790c68b278eb6527684bf6e49dd356ed891d0a81",
+      "bytes": 19174938
+    },
+    "weights/group.pt": {
+      "sha256": "0819a3bb125d1d6fd6fa1909d1e10957b487a8a4a10ff480fe7eded389de72dc",
+      "bytes": 3189250
+    },
+    "weights/scene.pt": {
+      "sha256": "0eb15ad1fc9ecbbaa7747fac6b94128ad6897037600b4693e75bdcfaeff42874",
+      "bytes": 3212866
+    }
+  },
+  "metrics": {
+    "scene": {
+      "top1": 0.8709,
+      "top1_std": 0.028,
+      "top5": 0.996,
+      "val_n": 1306,
+      "note": "5 折折外（新旧混合分布），每折独立训练"
+    },
+    "scene_new_only": {
+      "top1": 0.822,
+      "std": 0.02,
+      "val_n": 759,
+      "note": "只统计折外的新数据"
+    }
+  },
+  "notes": "scene 头用合并数据重训；group/action/bin_* 未重训，仍是 v5.0.0 的权重"
+}

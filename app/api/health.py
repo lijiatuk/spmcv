@@ -1,0 +1,102 @@
+"""运维端点。
+
+`/healthz` 与 `/readyz` 必须分开：
+
+* `/healthz`（liveness）——只证明进程活着，**不碰任何下游**。
+  容器编排用它判断"要不要重启"，不应受下游抖动影响。
+  之前这里同步调 vision + kev（各 5s 超时），最坏 10s，
+  超过 compose 的 5s healthcheck timeout，容器会被反复重启。
+* `/readyz`（readiness）——能否接流量。探测下游但用短超时（默认 2s），
+  失败返回 503，让负载均衡把流量摘走，而不是重启容器。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+
+import httpx
+from fastapi import APIRouter, Response
+
+from app.config import BASE_DIR, settings
+from app.metrics import metrics
+from app.services.kev_client import KevJudge
+
+router = APIRouter(tags=["ops"])
+KEV = KevJudge()
+
+
+def _probe(url: str, path: str = "/healthz") -> dict:
+    try:
+        r = httpx.get(f"{url.rstrip('/')}{path}", timeout=settings.readiness_timeout)
+        result = {"ok": r.status_code == 200, "status": r.status_code}
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = {}
+        for key in ("model_version", "auxiliary_enabled"):
+            if key in payload:
+                result[key] = payload[key]
+        return result
+    except Exception as exc:  # noqa: BLE001 - 探针只关心可用性
+        return {"ok": False, "error": type(exc).__name__}
+
+
+@router.get("/healthz")
+def healthz():
+    """liveness：不查下游，永远快速返回。"""
+    return {"ok": True, "version": settings.version}
+
+
+@router.get("/readyz")
+def readyz(response: Response):
+    """readiness：下游不可达时返回 503。"""
+    vision = _probe(settings.vision_url)
+    ocr = _probe(settings.ocr_service_url)
+    kev = KEV.health()
+    ready = vision["ok"] and ocr["ok"]
+    if not ready:
+        response.status_code = 503
+    return {"ok": ready, "vision": vision, "ocr": ocr, "kev": kev}
+
+
+@router.get("/v1/meta")
+def meta():
+    manifest_path = BASE_DIR / "models/current/manifest.json"
+    try:
+        model_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        model_manifest = {}
+    return {
+        "name": settings.app_name,
+        "version": settings.version,
+        "components": ["vision", "ocr", "rules"],
+        "contract": {
+            "api_version": "v1",
+            "taxonomy_version": "v1",
+            "decision_values": ["pass", "review"],
+            "machine_codes": True,
+            "model_version_in_photo_result": True,
+            "auxiliary_fusion_enabled": settings.enable_fusion,
+        },
+        "model": {
+            "configured_version": model_manifest.get("model_version"),
+            "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            if manifest_path.is_file() else None,
+            "configured_roles": sorted((model_manifest.get("roles") or {}).keys()),
+            "runtime_version_confirmed_per_photo": True,
+        },
+        "limits": {
+            "max_concurrent": settings.max_concurrent,
+            "max_photos": settings.max_photos,
+            "max_image_mb": settings.max_image_bytes // (1024 * 1024),
+            "max_total_mb": settings.max_total_bytes // (1024 * 1024),
+            "service_timeout_s": settings.service_timeout,
+        },
+        "use_vlx": settings.use_vlx,
+        "kev_mode": settings.kev_mode,
+    }
+
+
+@router.get("/metrics")
+def prometheus_metrics():
+    return metrics.render()

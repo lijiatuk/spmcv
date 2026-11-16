@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+ultralytics
+torch
+torchvision
+scikit-learn
+joblib
+pillow
+pandas
+numpy
+rapidocr
+onnxruntime
+pydantic-settings
+pytest
