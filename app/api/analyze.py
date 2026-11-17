@@ -119,13 +119,13 @@ def _label_boxes(raw: dict) -> list[dict]:
 
 def _service_sign_boxes(data: bytes, filename: str,
                         deadline: float | None = None) -> tuple[list[dict], int | None]:
-    """末页签字/盖章：低阈值检测 + 旋转兜底 + VLX 兜底。
+    """末页签字/盖章：低阈值检测 → VLX 兜底 → 旋转兜底。
 
-    返回 (boxes, rotated)。boxes 里的坐标始终是**原图**坐标，
-    旋转兜底命中的框会映射回来，前端画框不会错位。
+    顺序按性价比排：VLX 缩图后 ~1.5s 且能认出小号手写签字；
+    旋转只救"整页拍歪"的个例（~1/34），放在最后，预算不够就跳过。
 
-    ``deadline`` 是 time.monotonic() 的绝对截止时间（来自单图分析预算）。
-    旋转和 VLX 都要额外网络/编码开销，预算不够就跳过，避免把整张图拖到超时。
+    ``deadline`` 是 time.monotonic() 的绝对截止时间（来自单图分析预算），
+    所有兜底都必须在预算内完成，否则整张图会被判成超时降级。
     """
     def left() -> float:
         return 1e9 if deadline is None else deadline - time.monotonic()
@@ -138,13 +138,22 @@ def _service_sign_boxes(data: bytes, filename: str,
 
     boxes = scan(data)
 
-    def found(label: str, limit: float) -> bool:
-        return any(b["label"] == label and b["score"] >= limit for b in boxes)
+    def found(label: str) -> bool:
+        limit = SIGN_CONF if label == "signature" else STAMP_CONF
+        return any(b["label"] == label
+                   and (b.get("source") == "vlx" or b["score"] >= limit)
+                   for b in boxes)
 
-    missing = {label for label, limit in (("signature", SIGN_CONF),
-                                          ("stamp", STAMP_CONF))
-               if not found(label, limit)}
-    if not missing:
+    def missing() -> set[str]:
+        return {label for label in ("signature", "stamp") if not found(label)}
+
+    if not missing():
+        return boxes, None
+
+    if left() > 1.0:
+        boxes = boxes + _vlx_sign_boxes(data, filename, min(4.0, left() - 0.3))
+
+    if not missing():
         return boxes, None
 
     try:
@@ -152,9 +161,6 @@ def _service_sign_boxes(data: bytes, filename: str,
     except Exception:
         return boxes, None
 
-    # 只接住「原来缺的那一项」，旋转图里重复检出的另一项不要，
-    # 否则 rotated_detection 会变成没有意义的噪声。
-    # 不能一命中就 break：转了 90° 可能只找到盖章，签字要转到 270° 才出来。
     used_angle = None
     for angle in (90, 270):
         if left() < 1.2:
@@ -165,26 +171,38 @@ def _service_sign_boxes(data: bytes, filename: str,
             continue
         extra = []
         for b in alt:
-            if b["label"] not in missing:
+            if b["label"] not in missing():
                 continue
             limit = SIGN_ROTATED_CONF if b["label"] == "signature" else STAMP_ROTATED_CONF
             if b["score"] < limit:
                 continue
             x1, y1, x2, y2 = _box_to_original(b["box"], angle, width, height)
             extra.append({**b, "box": [x1, y1, x2, y2]})
-            missing.discard(b["label"])
         if extra:
             boxes.extend(extra)
             used_angle = angle
-        if not missing:
+        if not missing():
             break
-    if missing and left() > 1.0:
-        boxes = boxes + _vlx_sign_boxes(data, filename, min(4.0, left() - 0.3))
     return boxes, used_angle
 
 
 VLX_LABELS = {"客户签字": "signature", "服务站盖章": "stamp",
               "签字": "signature", "盖章": "stamp"}
+# VLX 的耗时和图片像素线性相关：1080x2270 的末页要 7s+，缩到 1600 长边只要 1.5s，
+# 而签字/盖章依然认得出来（再缩到 1000 会丢签字）。
+VLX_SIGN_MAX_SIDE = 1600
+
+
+def _vlx_sign_payload(data: bytes) -> tuple[bytes, float]:
+    """把末页缩到 VLX 能快速处理的大小，返回 (bytes, 缩放系数)。"""
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+    width, height = img.size
+    scale = min(1.0, VLX_SIGN_MAX_SIDE / max(width, height))
+    if scale < 1.0:
+        img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue(), scale
 
 
 def _vlx_sign_boxes(data: bytes, filename: str, timeout: float = 4.0) -> list[dict]:
@@ -197,9 +215,10 @@ def _vlx_sign_boxes(data: bytes, filename: str, timeout: float = 4.0) -> list[di
     if not settings.vlx_sign_fallback or not settings.vlx_url:
         return []
     try:
+        payload, scale = _vlx_sign_payload(data)
         base_timeout = getattr(VLX_FALLBACK, "timeout", 0.0)
         client = VLX_FALLBACK if timeout >= base_timeout else VLXClient(settings.vlx_url, timeout)
-        resp = client.recognize(data, filename, "service_sign")
+        resp = client.recognize(payload, filename, "service_sign")
     except Exception:  # noqa: BLE001 - 兜底失败不能影响主结果
         return []
     out = []
@@ -207,9 +226,11 @@ def _vlx_sign_boxes(data: bytes, filename: str, timeout: float = 4.0) -> list[di
         label = VLX_LABELS.get(str(b.get("label") or "").strip())
         if not label:
             continue
+        # 框坐标乘回原图尺度，evidence 里画框不会缩水
+        k = 1.0 / scale if scale else 1.0
         out.append({"label": label, "score": 0.0, "source": "vlx",
-                    "box": [float(b.get("xmin") or 0), float(b.get("ymin") or 0),
-                            float(b.get("xmax") or 0), float(b.get("ymax") or 0)]})
+                    "box": [float(b.get("xmin") or 0) * k, float(b.get("ymin") or 0) * k,
+                            float(b.get("xmax") or 0) * k, float(b.get("ymax") or 0) * k]})
     return out
 
 
