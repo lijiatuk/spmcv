@@ -65,7 +65,10 @@ async def run(args: argparse.Namespace) -> dict:
                     results.append({
                         "status": response.status_code,
                         "latency_ms": elapsed,
-                        "business_result": payload.get("result"),
+                        # /v1/check 用 HTTP 状态码表示业务结论；旧接口仍用 result。
+                        "business_result": ("pass" if response.status_code == 200
+                                            else "fail" if response.status_code == 422
+                                            else payload.get("result")),
                         "photo_latency_ms": [photo.get("latency_ms") for photo in photos
                                              if isinstance(photo, dict)
                                              and photo.get("latency_ms") is not None],

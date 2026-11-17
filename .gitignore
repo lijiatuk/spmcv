@@ -16,6 +16,8 @@ data/
 docs/*
 !docs/*.md
 docs/reports/
+!docs/archive/
+!docs/archive/*.md
 
 # ---- 工具：只跟踪脚本，不跟踪 node_modules ----
 tools/*

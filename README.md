@@ -25,7 +25,7 @@ web/                        前端（独立目录，与 app 同级，可直接�
 app/                        服务代码
   main.py                    app factory + 挂载 web/
   config.py metrics.py limits.py obs.py sso.py scenes.json
-  api/                       analyze / workorder / categories / health / viz
+  api/                       analyze / workorder / categories / check / health / viz
   services/                  客户端 + 业务 + 两个推理服务（8016 / 8018）
 
 data/                       数据（不进 git）
@@ -36,16 +36,15 @@ data/                       数据（不进 git）
   splits/                   工单分组划分
 
 models/                     模型注册表（registry + current 软链 + 版本目录）
-docs/                       方案与报告（docs/reports/）
+docs/                       文档索引 + 对外接口 + 部署/训练 + 报告/归档（见 docs/README.md）
 deploy/                     Docker Compose + 三个 Dockerfile + nginx
 scripts/                    数据处理 / 训练 / 评测 / 模型管理
 tests/                      pytest
 var/                        运行产物：runs/ logs/ feedback.sqlite3（不进 git）
-attic/                      退役脚本（可回滚，确认无用后再删）
 ```
 
 > 历史实验产物（30+ 个旧 run、v3 数据集、归档数据）已于 2026-11-16 清理，
-> 腾出约 1.5GB。退役脚本在 `attic/scripts/`，需要时再翻。
+> 腾出约 1.5GB。
 ## 2. 环境
 
 ```bash
@@ -109,70 +108,42 @@ MAX_CONCURRENT=4 \
 
 ## 6. API
 
+**对外功能验收：一个入口 + 场景参数。** 判定只看 HTTP 状态码：`200` = 需求满足，`422` = 不满足。
+
 ```bash
-curl -s http://127.0.0.1:8017/v1/meta
-curl -s http://127.0.0.1:8017/metrics
-curl -s http://127.0.0.1:8017/v1/analyze \
-  -F "image=@/path/to/photo.jpg" \
-  -F "axle_type=hande" -F "expected_action=fill" \
+curl -X POST http://127.0.0.1:8017/v1/check \
+  -F "scene=arrival" \
+  -F "images=@plate.jpg" -F "images=@license.jpg" \
+  -F "images=@frame.jpg" -F "images=@odometer.jpg" \
+  -F "expected_plate=晋D08906D" \
   -F "expected_vin=HLC3J2VF9TA604594" -F "expected_odometer=182"
 ```
 
-**整单校验**（一次上传同一工单的多张照片，按业务规则汇总）：
+响应固定四个字段：`scene` / `message` / `missing` / `data`，**没有 `ok` / `result` / `codes` / `boxes`**。
+`data` 按场景返回：接车 `plate`/`vin`/`odometer`；维修 `axle`/`tire`/`filter`；检查表 `vin`/`vin_partial`/`signature`/`stamp`。
+`expected_*` 可选，传了才与工单比对。
 
-```bash
-curl -s http://127.0.0.1:8017/v1/workorder \
-  -F "images=@接车.jpg" -F "images=@行驶证.jpg" -F "images=@车架.jpg" \
-  -F "images=@里程.jpg" -F "images=@服务单末页.jpg" \
-  -F "work_order_id=IKD2045720261106001" \
-  -F "expected_vin=HLC3J2VF0TA605309" \
-  -F "expected_odometer=4618" -F "axle_type=hande"
+三个场景路径是等价别名，返回完全一样：
+
+```text
+POST /v1/check/arrival
+POST /v1/check/repair
+POST /v1/check/inspection
 ```
 
-返回 `result`（`pass` 才能自动通过）/ `review_reasons` / `vin`（含各场景 VIN 是否一致）/ `mileage`（5% 偏差）/
-`oil` / `filter` / `service_sign` / `missing_scenes`，以及每张照片的明细。
+完整字段、Excel 需求对照、错误码见 [`docs/上层调用接口文档.md`](docs/上层调用接口文档.md)。
 
-实现的是规格 Excel 里的跨图规则：
+以下路径保留给控制台/内部排查，返回结构不是对外契约：
+`/v1/arrival`、`/v1/repair`、`/v1/inspection`、`/v1/scan`、`/v1/workorder`、`/v1/analyze`。
 
-- 行驶证 VIN 与车架 VIN 必须一致（都缺失或冲突 → 不自动通过）
-- 里程与工单偏差 >5% → 复核
-- 汉德桥：不得出现桥放油；不做轮胎油液与滤芯判定
-- 必须存在接车照片、里程表、服务单末页
-- 服务单末页必须有客户签字与服务站盖章
-
-- `/healthz`：liveness，不查下游，恒快返回
-- `/readyz`：readiness，探测 vision/ocr，不可达返回 503
-**按素材目录分三个接口**（推荐，调用方不用自己判断场景）：
-
-| 接口 | 对应目录 | 返回 |
-|---|---|---|
-| `POST /v1/arrival` | `01_接车照片` | 车牌、行驶证 VIN、车架 VIN、里程；两个 VIN 必须一致 |
-| `POST /v1/repair` | `02_故障及修复照片` | 桥/轮胎 加油或放油、有/无滤芯；`axle_type=hande` 启用汉德桥规则 |
-| `POST /v1/inspection` | `03_项目检查表` | 服务单首页 VIN（可仅尾段）、末页签字与盖章 |
-
-三者都接收同类多张照片，返回 `result` / `reasons` / `photos` / `unexpected`（传错类的照片）。
-`result` 只有三个取值：`pass`（可自动通过）、`partial`（照片不齐，仅 arrival）、`review`（需人工）。
-上层只判这一个字段，不要在客户端重新拼 boolean。
-
-```bash
-curl -s http://127.0.0.1:8017/v1/arrival \
-  -F "images=@接车.jpg" -F "images=@行驶证.jpg" \
-  -F "images=@车架.jpg" -F "images=@里程.jpg"
-
-curl -s http://127.0.0.1:8017/v1/repair \
-  -F "images=@桥.jpg" -F "images=@轮胎.jpg" -F "images=@滤芯.jpg" -F "axle_type=hande"
-
-curl -s http://127.0.0.1:8017/v1/inspection \
-  -F "images=@服务单首页.jpg" -F "images=@服务单末页.jpg"
-```
-
-通用接口仍保留：`/v1/analyze`（单图）、`/v1/workorder`（跨类整单汇总）。
-
-- `/v1/meta`：组件、并发与上传限制
-- `/metrics`：按 `image` / `workorder` 分开的请求数、错误、在途、P50/P95
+- `/v1/meta`：版本、模型、并发与上传限制
+- `/metrics`：请求数、错误、在途、P50/P95
+- `/healthz` / `/readyz`：存活 / 下游就绪
 - `/docs`：OpenAPI
 
-上传限制：单图 ≤15MB、单工单 ≤20 张 / 80MB、像素 ≤5000 万，按 magic bytes 判格式（不信扩展名）。
+上传限制：单图 ≤15MB、单请求 ≤20 张 / 80MB、像素 ≤5000 万，按 magic bytes 判格式（不信扩展名）；
+准入默认 8 并发、120 次/分钟。
+
 
 ## 7. 给别人验收（局域网）
 
@@ -237,7 +208,7 @@ kev（`http://10.51.13.7:8008/v1/systemone`）是 4B pointer head，**只吃文�
 
 > 尾延迟的真实问题：vision 和 ocr 各有一把全局 `LOCK`，5 图并发会被串成 20–40 s。
 > 这是并发模型问题，不是模型问题，部署前必须按
-> [`docs/生产部署方案.md`](docs/生产部署方案.md) 的 T2/T3 改造。
+> [`docs/archive/生产部署方案.md`](docs/archive/生产部署方案.md) 的 T2/T3 改造。
 
 三头级联：**12 类场景头**定场景 → **3 类分组头**（桥/轮胎/滤芯）纠正油液分组 →
 **组内 2 分类头**定加油/放油/有滤芯/无滤芯。
@@ -317,7 +288,7 @@ curl http://<IP>:8080/healthz
 
 `data/external/spec/` 保存了规格 Excel 内嵌图的标注副本，既用于回归评测，也作为困难样本回流训练。
 
-> **生产部署**：完整方案见 [`docs/生产部署方案.md`](docs/生产部署方案.md)（GPU 共享策略、OCR 容量规划、许可证、性能改造、日志、回滚与验收清单）。本节的 `deploy/` 是开发用 compose，不是生产配置。
+> **生产部署**：完整方案见 [`docs/部署方案.md`](docs/部署方案.md)（GPU 共享策略、OCR 容量规划、许可证、日志、回滚与验收清单）；历史性能改造记录见 [`docs/archive/生产部署方案.md`](docs/archive/生产部署方案.md)。本节的 `deploy/` 是开发用 compose，不是生产配置。
 
 验收建议：按工单分组抽 200–300 张黄金集，统计各场景字段准确率、自动通过率、误放行率；
 P95 目标 < 3 s（单张、4 并发），需要更高吞吐时横向扩 `vision`/`ocr` 副本。
@@ -332,7 +303,6 @@ P95 目标 < 3 s（单张、4 并发），需要更高吞吐时横向扩 `vision
 | `data/processed/union/` | 合并数据集切分 | ⚠️ 可由 `build_union.py` 重建 |
 | `models/<version>/` | 已发布模型（含 sha256 manifest） | ❌ 需要回滚能力 |
 | `var/runs/` | 训练产物 | ✅ 只保留 `models/` 引用到的 |
-| `attic/` | 退役脚本 | ✅ 确认无用后可删 |
 
 清理脚本会先核对 `var/runs` 是否被 `models/registry.json` 或 `docs/reports` 引用，
 再决定删除，避免把能复现报告的证据删掉。

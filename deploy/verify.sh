@@ -23,17 +23,17 @@ contract=$(curl -s -m 10 "$BASE/v1/meta" | python3 -c "import sys,json;d=json.lo
 check "接口契约版本" "${contract:-none}" "v1"
 
 if [ -n "$IMG" ] && [ -f "$IMG" ]; then
-  out=$(curl -s -m 120 -X POST "$BASE/v1/scan" -F "images=@$IMG" -F "category=arrival")
-  echo "$out" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-print('  识别结果: decision=%s plate=%s codes=%s' % (d.get('decision'), d.get('plate'), (d.get('codes') or [])[:2]))
-assert d.get('decision') in ('pass','review'), 'decision 异常'
-assert not d.get('degraded'), '返回降级（TIMEOUT），检查 REQUEST_DEADLINE_S 或 GPU'
-" || fail=$((fail+1))
-  say "端到端识别 /v1/scan" "$([ $fail -eq 0 ] && echo ✅ || echo ❌)"
+  out=$(curl -s -w '\n%{http_code}' -m 120 -X POST "$BASE/v1/check/arrival" -F "images=@$IMG")
+  code=${out##*$'\n'}
+  body=${out%$'\n'*}
+  echo "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  识别结果: scene=%s message=%s" % (d.get("scene"), d.get("message"))); assert set(d)=={"scene","message","missing","data"}, "响应结构不符：%s" % set(d); assert d.get("scene")=="arrival"' || fail=$((fail+1))
+  if [ "$code" = "200" ] || [ "$code" = "422" ]; then
+    say "端到端识别 /v1/check/arrival" "✅ HTTP $code"
+  else
+    say "端到端识别 /v1/check/arrival" "❌ HTTP $code"; fail=$((fail+1))
+  fi
 else
-  say "端到端识别 /v1/scan" "⏭ 未提供样例图片"
+  say "端到端识别 /v1/check/arrival" "⏭ 未提供样例图片"
 fi
 
 # 接口契约（上层接入前必须通过）
