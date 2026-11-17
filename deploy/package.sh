@@ -24,7 +24,10 @@ MODE=$([[ $WITH_DATA == 1 ]] && echo full || echo release)
 OUT="dist/spmcv-${MODE}-${STAMP}.tar.gz"
 mkdir -p dist
 
+# --no-xattrs：macOS 的 bsdtar 会写入 com.apple.quarantine 等扩展属性，
+# Linux 解包时只是 warn 后忽略，但每次刷噪音；这里打干净包。
 COMMON_EXCLUDES=(
+  --no-xattrs
   --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store'
   --exclude='.pytest_cache' --exclude='.ruff_cache' --exclude='.git'
   --exclude='./models/pretrained'      # 训练用底模，推理不需要
