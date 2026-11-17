@@ -48,7 +48,7 @@ def collect(dirs: list[Path]) -> list[dict]:
             want = slug_of.get(group.name)
             if not want:
                 continue
-            for img in sorted(group.glob("*.jpg")):
+            for img in sorted(list(group.glob("*.jpg")) + list(group.glob("*.png"))):
                 items.append({"path": img, "folder": root.name,
                               "class": group.name, "want": want})
     return items
@@ -161,7 +161,7 @@ def main() -> int:
             sign_n["stamp"] += 1
             sign_ok["stamp"] += not any("盖章" in r for r in reasons)
         details.append({
-            "file": str(row["path"].relative_to(ROOT)),
+            "file": str(Path(row["path"]).resolve().relative_to(ROOT)),
             "folder": row["folder"], "want": want, "got": got,
             "confidence": body.get("scene_confidence"),
             "fields": fields, "review_reasons": body.get("review_reasons"),
