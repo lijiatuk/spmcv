@@ -38,6 +38,110 @@
   let allowedViews = null;   // null = 不鉴权，全部可用
   const loaded = new Set();
 
+  /* ---------- 通用 UI：轻提示 / 骨架 / 空态 / 坏图占位 ---------- */
+  let toastTimer = null;
+  function toast(message, kind) {
+    const node = $("toast");
+    node.textContent = message;
+    node.className = "toast on" + (kind === "bad" ? " bad" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { node.className = "toast"; }, 3200);
+  }
+
+  function skeleton(rows = 3, height = 16) {
+    const box = el("div", "sk");
+    box.style.display = "grid";
+    box.style.gap = "10px";
+    for (let i = 0; i < rows; i++) {
+      const bar = el("div", "skeleton");
+      bar.style.height = `${height}px`;
+      bar.style.width = `${i === rows - 1 ? 62 : 100}%`;
+      box.append(bar);
+    }
+    return box;
+  }
+
+  function emptyState(icon, title, sub, actionLabel, onAction) {
+    const box = el("div", "empty-state");
+    box.append(el("div", "es-ico", icon), el("div", "es-t", title), el("div", "es-s", sub));
+    if (actionLabel) {
+      const btn = el("button", "btn es-a", actionLabel);
+      btn.type = "button";
+      if (onAction) btn.addEventListener("click", onAction);
+      box.append(btn);
+    }
+    return box;
+  }
+
+  // 图片挂了（路径失效 / 文件被删）不要留一块 300px 的黑，
+  // 也不要让浏览器把卡片的排版撑坏：统一换成占位。
+  let brokenImages = 0;
+  const brokenListeners = new Set();
+  function markBroken(img) {
+    if (!img || img.dataset.broken) return;
+    img.dataset.broken = "1";
+    brokenImages += 1;
+    const host = img.parentElement;
+    if (host) {
+      host.classList.add("is-broken");
+      if (!host.querySelector(".ph-broken")) {
+        const ph = el("div", "ph-broken");
+        ph.append(el("b", null, "图片不可用"), el("span", null, "文件缺失或路径失效"));
+        host.append(ph);
+      }
+      const card = host.closest(".lcard, .card-row, .mcard");
+      if (card) card.classList.add("broken");
+    }
+    brokenListeners.forEach((fn) => { try { fn(brokenImages); } catch (_) {} });
+  }
+  function resetBroken(img) {
+    if (!img) return;
+    delete img.dataset.broken;
+    const host = img.parentElement;
+    if (!host) return;
+    host.classList.remove("is-broken");
+    const ph = host.querySelector(".ph-broken");
+    if (ph) ph.remove();
+  }
+  document.addEventListener("error", (e) => {
+    const t = e.target;
+    if (t && t.tagName === "IMG") markBroken(t);
+  }, true);
+
+  function copyText(text, okMsg) {
+    const done = () => toast(okMsg || "已复制到剪贴板");
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallback());
+    } else fallback();
+    function fallback() {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.append(ta);
+      ta.select();
+      try { document.execCommand("copy"); done(); } catch (_) { toast("复制失败，请手动选择", "bad"); }
+      ta.remove();
+    }
+  }
+
+  /* ---------- 移动端导航抽屉 ---------- */
+  function setDrawer(open) {
+    document.body.classList.toggle("drawer-open", open);
+    $("menuBtn").setAttribute("aria-expanded", String(open));
+    $("menuBtn").setAttribute("aria-label", open ? "关闭导航菜单" : "打开导航菜单");
+    $("scrim").hidden = !open;
+  }
+  $("menuBtn").addEventListener("click", () =>
+    setDrawer(!document.body.classList.contains("drawer-open")));
+  $("scrim").addEventListener("click", () => setDrawer(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("drawer-open")) setDrawer(false);
+  });
+  window.addEventListener("resize", () => {
+    if (!window.matchMedia("(max-width: 960px)").matches) setDrawer(false);
+  });
+
   /* ---------- 路由 ---------- */
   let currentView = null;
 
@@ -46,11 +150,18 @@
     if (view === currentView) return;      // 避免 hashchange → go() → 改 hash 的递归
     currentView = view;
     if (allowedViews && !allowedViews.has(view)) { showDeny(view); return; }
-    document.querySelectorAll(".nav-item").forEach((a) =>
-      a.classList.toggle("on", a.dataset.view === view));
+    setDrawer(false);
+    document.querySelectorAll(".nav-item").forEach((a) => {
+      const on = a.dataset.view === view;
+      a.classList.toggle("on", on);
+      if (on) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
+    });
     Object.keys(TITLES).forEach((v) => { $("view-" + v).hidden = v !== view; });
     $("pageTitle").textContent = TITLES[view];
+    document.title = `${TITLES[view]} · SPM 视觉识别`;
     location.hash = view;
+    if (view === "infer" && !$("out").children.length) renderInferEmpty();
     if (view === "overview") loadOverview();
     if (view === "eval") loadEval();
     if (view === "dataset") loadDataset();
@@ -62,7 +173,8 @@
   // 浏览器前进/后退、手改地址栏 hash 都要能切页
   window.addEventListener("hashchange", () => {
     const v = (location.hash || "#overview").slice(1);
-    if (v && v !== currentView) go(v);
+    // 跳过页内锚点（例如“跳到主要内容”的 #main），只有真实视图才切页
+    if (v && v !== currentView && TITLES[v]) go(v);
   });
 
   document.querySelector(".sidebar").addEventListener("click", (e) => {
@@ -83,19 +195,40 @@
     return c;
   }
 
-  function barChart(items, keyLabel, keyValue) {
-    const w = 900, h = 230, padL = 40, padB = 44, padT = 10;
+  // 窄屏用列表代替缩放后的 SVG：12 个类的文字在 340px 里不可能看清
+  function barList(items, keyLabel, keyValue) {
+    const box = el("div", "chart-list");
+    items.forEach((it) => {
+      const v = Math.max(0, Math.min(1, it[keyValue] ?? 0));
+      const row = el("div", "cl");
+      const track = el("div", "track");
+      const fill = el("i");
+      fill.style.width = `${v * 100}%`;
+      if (v < 0.7) fill.classList.add("low");
+      track.append(fill);
+      const pct = el("span", "pct" + (v < 0.7 ? " low" : ""), `${Math.round(v * 100)}%`);
+      if (it.support != null) pct.title = `n=${it.support}`;
+      row.append(el("span", "lab", it[keyLabel]), track, pct);
+      box.append(row);
+    });
+    return box;
+  }
+
+  function barChart(items, keyLabel, keyValue, opts = {}) {
+    const w = 900, h = 244, padL = 42, padB = 46, padT = 16;
     const ns = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(ns, "svg");
     svg.setAttribute("class", "chart");
     svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    svg.setAttribute("role", "img");
     const defs = document.createElementNS(ns, "defs");
     defs.innerHTML = '<linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">'
       + '<stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#93c5fd"/></linearGradient>';
     svg.append(defs);
 
+    const plotH = h - padT - padB;
     for (let i = 0; i <= 4; i++) {
-      const y = padT + (h - padT - padB) * (i / 4);
+      const y = padT + plotH * (i / 4);
       const l = document.createElementNS(ns, "line");
       l.setAttribute("x1", padL); l.setAttribute("x2", w - 4);
       l.setAttribute("y1", y); l.setAttribute("y2", y);
@@ -108,28 +241,49 @@
       svg.append(t);
     }
 
+    // 参照线：总体准确率。逐类柱子和总体线一起看才知道差距在哪。
+    if (opts.ref != null && isFinite(opts.ref)) {
+      const ry = padT + plotH * (1 - Math.max(0, Math.min(1, opts.ref)));
+      const rl = document.createElementNS(ns, "line");
+      rl.setAttribute("x1", padL); rl.setAttribute("x2", w - 4);
+      rl.setAttribute("y1", ry); rl.setAttribute("y2", ry);
+      rl.setAttribute("stroke", "#94a3b8");
+      rl.setAttribute("stroke-width", "1.2");
+      rl.setAttribute("stroke-dasharray", "5 4");
+      const rt = document.createElementNS(ns, "title");
+      rt.textContent = `整体准确率 ${(opts.ref * 100).toFixed(1)}%`;
+      rl.append(rt);
+      svg.append(rl);
+    }
+
     const n = items.length || 1;
     const bw = Math.max(8, (w - padL - 8) / n - 6);
     items.forEach((it, i) => {
       const v = Math.max(0, Math.min(1, it[keyValue] ?? 0));
       const x = padL + i * ((w - padL - 8) / n) + 3;
-      const bh = (h - padT - padB) * v;
+      const bh = plotH * v;
       const r = document.createElementNS(ns, "rect");
       r.setAttribute("x", x); r.setAttribute("y", h - padB - bh);
       r.setAttribute("width", bw); r.setAttribute("height", Math.max(1, bh));
       r.setAttribute("rx", 3);
       r.setAttribute("class", "bar" + (v < 0.7 ? " low" : ""));
+      const title = document.createElementNS(ns, "title");
+      title.textContent = `${it[keyLabel]}：${(v * 100).toFixed(1)}%`
+        + (it.support != null ? `（n=${it.support}）` : "");
+      r.append(title);
       svg.append(r);
       const t = document.createElementNS(ns, "text");
-      t.setAttribute("x", x + bw / 2); t.setAttribute("y", h - padB + 14);
+      t.setAttribute("x", x + bw / 2); t.setAttribute("y", h - padB + 15);
       t.setAttribute("class", "axis"); t.setAttribute("text-anchor", "middle");
       t.setAttribute("font-size", "11");
       t.textContent = it[keyLabel];
       svg.append(t);
       const v2 = document.createElementNS(ns, "text");
-      v2.setAttribute("x", x + bw / 2); v2.setAttribute("y", h - padB + 29);
+      v2.setAttribute("x", x + bw / 2); v2.setAttribute("y", h - padB + 30);
       v2.setAttribute("class", "axis"); v2.setAttribute("text-anchor", "middle");
       v2.setAttribute("font-size", "11");
+      v2.setAttribute("font-weight", v < 0.7 ? "600" : "400");
+      v2.setAttribute("fill", v < 0.7 ? "#d97706" : "#94a3b8");
       v2.textContent = `${Math.round(v * 100)}%`;
       svg.append(v2);
     });
@@ -152,10 +306,23 @@
   }
 
   async function loadOverview() {
+    if (!ov) {
+      // 首屏先用骨架占位，避免「四张空卡片 + 空图表」的闪一下
+      $("kpis").replaceChildren(...[0, 1, 2, 3].map(() => {
+        const box = el("div", "kpi");
+        box.append(skeleton(2, 14));
+        return box;
+      }));
+      $("accChart").replaceChildren(skeleton(6, 22));
+      $("modelList").replaceChildren(skeleton(5, 16));
+    }
     try {
       ov = await api("/viz/api/overview");
     } catch (err) {
-      $("kpis").replaceChildren(el("div", "meta", "加载失败：" + err.message));
+      $("kpis").replaceChildren();
+      $("accChart").replaceChildren(emptyState("!", "总览数据加载失败", err.message + "。稍后重试或检查 /viz/api/overview。",
+        "重试", loadOverview));
+      $("modelList").replaceChildren();
       return;
     }
     const perf = ov.perf.image || {};
@@ -170,6 +337,60 @@
     $("modelVersion").textContent = `模型 ${ov.model.version} · ${ov.model.heads} 个头`;
     renderAccChart();
     renderModels(perf);
+    ensureOpsCard();
+    loadOps();
+  }
+
+  /* ---------- 运行指标（/metrics） ---------- */
+  function ensureOpsCard() {
+    if ($("opsCard")) return;
+    const card = el("div", "card");
+    card.id = "opsCard";
+    card.style.marginTop = "14px";
+    const head = el("div", "card-head");
+    head.append(el("span", "t", "服务运行指标"),
+      el("span", "hint", "来自 /metrics · 进程启动以来累计"));
+    card.append(head, el("div", "ops", ""));
+    card.lastChild.id = "ops";
+    $("view-overview").append(card);
+  }
+
+  async function loadOps() {
+    const box = $("ops");
+    if (!box) return;
+    box.replaceChildren(skeleton(1, 42));
+    try {
+      let text = await (await fetch("/metrics", { cache: "no-store" })).text();
+      // 兼容旧版本：/metrics 曾把 Prometheus 文本当 JSON 字符串返回
+      if (text.trim().startsWith('"')) { try { text = JSON.parse(text); } catch (_) {} }
+      const pick = (key) => {
+        const m = text.match(new RegExp(`^${key}\\s+([0-9.]+)`, "m"));
+        return m ? Number(m[1]) : null;
+      };
+      const p50 = pick("spm_image_latency_ms_p50");
+      const p95 = pick("spm_image_latency_ms_p95");
+      const req = pick("spm_image_requests_total");
+      const errs = pick("spm_image_errors_total");
+      const reviews = pick("spm_image_reviews_total");
+      const cells = [
+        { k: "单图 P95 延迟", v: p95 == null ? "—" : `${Math.round(p95)} ms`,
+          s: p50 == null ? "" : `P50 ${Math.round(p50)} ms · 目标 ≤ 2000 ms`,
+          warn: p95 != null && p95 > 2000 },
+        { k: "识图请求", v: req == null ? "—" : String(req), s: "累计（含失败）" },
+        { k: "复核率", v: req && reviews != null ? `${((reviews / req) * 100).toFixed(1)}%` : "—",
+          s: reviews == null ? "" : `复核 ${reviews} / 请求 ${req ?? 0}` },
+        { k: "错误数", v: errs == null ? "—" : String(errs), s: "5xx / 超时", warn: (errs || 0) > 0 },
+      ];
+      box.replaceChildren(...cells.map((c) => {
+        const op = el("div", "op");
+        const v = el("div", "v" + (c.warn ? " warn" : ""), c.v);
+        op.append(el("div", "k", c.k), v);
+        if (c.s) op.append(el("div", "s", c.s));
+        return op;
+      }));
+    } catch (err) {
+      box.replaceChildren(el("div", "meta", "运行指标不可用：" + err.message));
+    }
   }
 
   function renderAccChart() {
@@ -184,11 +405,36 @@
         evalMode === "old" ? "没有老域折外评测" : "没有严格折外评测结果"));
       return;
     }
-    const chart = barChart(rows, "label", "acc");
+    const narrow = window.matchMedia("(max-width: 720px)").matches;
+    const chart = narrow
+      ? barList(rows, "label", "acc")
+      : barChart(rows, "label", "acc", { ref: domain?.top1 });
     const title = document.querySelector("#view-overview .card .t");
-    if (title) title.textContent = `${evalMode === "new" ? "新域" : "旧域"}折外逐类召回率（按工单留出）`;
-    $("accChart").replaceChildren(chart);
+    if (title) {
+      title.textContent = `${evalMode === "new" ? "新域" : "旧域"}折外逐类召回率（按工单留出）`
+        + (domain?.top1 != null ? ` · 整体 ${(domain.top1 * 100).toFixed(1)}%` : "");
+    }
+    const legend = el("div", "chart-legend");
+    const legendItems = [["lg-ok", "≥ 70%"], ["lg-low", "< 70% 需关注"]];
+    if (!narrow) legendItems.push(["lg-ref", "整体准确率"]);
+    legendItems.forEach(([cls, label]) => {
+      const item = el("span", cls);
+      item.append(el("i"), document.createTextNode(label));
+      legend.append(item);
+    });
+    const note = el("div", "chart-note",
+      `口径：每折只用工单外的图片预测，n=${domain?.n ?? "—"}；` +
+      "反映目录标签一致性，不等于人工黄金集或整单通过率。悬停可看各类支持数（n）。");
+    $("accChart").replaceChildren(chart, legend, note);
   }
+
+  let narrowAcc = window.matchMedia("(max-width: 720px)").matches;
+  window.addEventListener("resize", () => {
+    const now = window.matchMedia("(max-width: 720px)").matches;
+    if (now === narrowAcc) return;
+    narrowAcc = now;
+    if (ov && !$("view-overview").hidden) renderAccChart();
+  });
 
   (function bindEvalToggle() {
     const seg = document.querySelector(".seg[data-eval]");
@@ -223,11 +469,101 @@
 
   /* ---------- 识别 ---------- */
   const CATS = {
-    arrival: { path: "/v1/arrival", hint: "点击或拖入接车照片", name: "接车照片" },
-    repair: { path: "/v1/repair", hint: "点击或拖入故障及修复照片", name: "故障及修复" },
-    inspection: { path: "/v1/inspection", hint: "点击或拖入项目检查表照片", name: "项目检查表" },
+    arrival: {
+      path: "/v1/arrival", hint: "点击或拖入接车照片", name: "接车照片",
+      what: "车牌、里程表、行驶证与车架 VIN 是否一致",
+      fields: [
+        { key: "expected_plate", label: "工单车牌（可选）", placeholder: "如 宁D09976D" },
+        { key: "expected_odometer", label: "工单里程（可选，km）", type: "number", placeholder: "如 182" },
+      ],
+    },
+    repair: {
+      path: "/v1/repair", hint: "点击或拖入故障及修复照片", name: "故障及修复",
+      what: "桥 / 轮胎的加油放油、有无滤芯，以及动作是否与工单一致",
+      fields: [
+        { key: "axle_type", label: "车桥类型", type: "select",
+          options: [["", "未指定"], ["hande", "汉德桥（校验收油规则）"]] },
+        { key: "expected_action", label: "工单动作", type: "select",
+          options: [["", "未指定"], ["fill", "加油"], ["drain", "放油"]] },
+      ],
+    },
+    inspection: {
+      path: "/v1/inspection", hint: "点击或拖入项目检查表照片", name: "项目检查表",
+      what: "服务单首页 VIN、末页签字与服务站盖章",
+      fields: [
+        { key: "expected_vin", label: "工单 VIN（可选）", placeholder: "17 位 VIN" },
+      ],
+    },
   };
   let cat = "arrival", files = [], scenes = [], urls = [], photoBoxes = [], photoFlags = [];
+  let activeIdx = 0, runTimer = null;
+  const inferValues = { arrival: {}, repair: {}, inspection: {} };
+
+  /* 参数区：后端支持与工单比对，前端以前完全没有入口 */
+  function renderInferParams() {
+    const box = $("inferParams");
+    if (!box) return;
+    box.replaceChildren();
+    const spec = CATS[cat];
+    spec.fields.forEach((f) => {
+      const wrap = el("div", "pf");
+      const id = `ip-${f.key}`;
+      const label = el("label", null, f.label);
+      label.setAttribute("for", id);
+      let input;
+      if (f.type === "select") {
+        input = el("select");
+        (f.options || []).forEach(([value, text]) => {
+          const o = el("option", null, text);
+          o.value = value;
+          input.append(o);
+        });
+        input.value = inferValues[cat][f.key] || "";
+        input.addEventListener("change", () => { inferValues[cat][f.key] = input.value; });
+      } else {
+        input = el("input");
+        input.type = f.type || "text";
+        input.placeholder = f.placeholder || "";
+        input.value = inferValues[cat][f.key] || "";
+        input.addEventListener("input", () => { inferValues[cat][f.key] = input.value.trim(); });
+      }
+      input.id = id;
+      wrap.append(label, input);
+      box.append(wrap);
+    });
+    box.append(el("div", "pf-note",
+      `这类照片会核对：${spec.what}。字段可以不填——只做识别；填了才会判断「与工单是否一致」。`));
+  }
+
+  function renderInferEmpty() {
+    const wrap = el("div", "result-empty");
+    wrap.append(emptyState("◎", "识别结论会显示在这里",
+      "选好照片后点「识别」：这里给出场景判定、OCR 字段（车牌 / VIN / 里程）、"
+      + "通过或需复核的结论，以及每一张的复核原因。"));
+    $("out").replaceChildren(wrap);
+  }
+
+  function renderFileList() {
+    const box = $("fileList");
+    if (!box) return;
+    box.replaceChildren();
+    box.hidden = files.length === 0;
+    files.forEach((f, i) => {
+      const chip = el("span", "fchip");
+      const name = el("b", null, f.name);
+      name.title = f.name;
+      const x = el("button", "x", "×");
+      x.type = "button";
+      x.setAttribute("aria-label", `移除 ${f.name}`);
+      x.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setFiles(files.filter((_, j) => j !== i));
+      });
+      chip.append(el("span", null, String(i + 1)), name, x);
+      box.append(chip);
+    });
+  }
 
   $("catSeg").addEventListener("click", (e) => {
     const b = e.target.closest("button");
@@ -236,8 +572,15 @@
     [...$("catSeg").children].forEach((x) => x.classList.toggle("on", x === b));
     $("hint").textContent = CATS[cat].hint;
     files = []; scenes = []; photoBoxes = []; activeIdx = 0;
-    drawPreview(); $("run").disabled = true; $("out").replaceChildren();
-    $("inferImgWrap").hidden = true; $("drop").classList.remove("compact");
+    drawPreview();
+    $("run").disabled = true;
+    $("run").textContent = "识别";
+    $("inferImgWrap").hidden = true;
+    $("drop").classList.remove("compact");
+    $("inferCounter").textContent = "";
+    renderFileList();
+    renderInferParams();
+    renderInferEmpty();
   });
 
   function drawPreview() {
@@ -247,13 +590,13 @@
     if (activeIdx >= files.length) activeIdx = 0;
   }
 
-  let activeIdx = 0;
-
   function showInferImage(i) {
     const wrap = $("inferImgWrap");
     if (!files.length) { wrap.hidden = true; $("drop").classList.remove("compact"); return; }
     activeIdx = Math.max(0, Math.min(i, files.length - 1));
     const img = $("inferImg");
+    resetBroken(img);
+    img.alt = files[activeIdx] ? files[activeIdx].name : "待识别照片";
     img.src = urls[activeIdx] || "";
     wrap.hidden = false;
     $("drop").classList.add("compact");
@@ -283,15 +626,22 @@
     files = Array.from(list).filter((f) => f.type.startsWith("image/"));
     scenes = []; photoBoxes = []; activeIdx = 0;
     $("files").value = "";
-    drawPreview(); $("run").disabled = files.length === 0;
-    $("out").replaceChildren();
+    drawPreview();
+    $("run").disabled = files.length === 0;
+    $("run").textContent = "识别";
+    renderFileList();
+    renderInferEmpty();
     showInferImage(0);
+    if (!files.length) $("hint").textContent = CATS[cat].hint;
   }
   $("files").addEventListener("change", (e) => setFiles(e.target.files));
   const drop = $("drop");
   ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
   ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
   drop.addEventListener("drop", (e) => setFiles(e.dataTransfer.files));
+  drop.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("files").click(); }
+  });
 
   const stat = (label, value, opts = {}) => {
     const box = el("div", "stat");
@@ -302,14 +652,27 @@
     box.append(v); return box;
   };
 
-  function renderResult(d) {
+  function renderResult(d, raw) {
     const wrap = el("div", "card"); wrap.style.marginTop = "14px";
     const insideN = (d.photos || []).length;
     const outsideN = (d.unexpected || []).length;
+    const reasons = d.reasons || [];
+
+    const verdict = el("div", "verdict " + (d.ok ? "ok" : "warn"));
+    verdict.append(el("span", "v-ico", d.ok ? "✓" : "!"));
+    const vMain = el("div");
+    vMain.append(el("div", "v-t", d.ok ? "可自动通过" : "需人工复核"),
+      el("div", "v-s", d.ok
+        ? `${CATS[cat].name} ${insideN} 张，未命中拦截规则`
+        : (reasons[0] || "存在需要人工确认的项")));
+    verdict.append(vMain);
+    if (d.degraded) verdict.append(el("span", "tag warn", "部分照片超时"));
+    wrap.append(verdict);
+
     const head = el("div", "result-head");
     const name = el("div", "name",
       `${CATS[cat].name} · 本类 ${insideN} 张` + (outsideN ? ` · 其他 ${outsideN} 张` : ""));
-    head.append(name, el("span", "tag " + (d.ok ? "ok" : "warn"), d.ok ? "通过" : "复核"));
+    head.append(name);
     wrap.append(head);
 
     if (d.degraded) {
@@ -359,9 +722,9 @@
     }
     wrap.append(s);
 
-    if (d.reasons?.length) {
+    if (reasons.length) {
       const ul = el("ul", "tips");
-      d.reasons.forEach((r) => ul.append(el("li", null, r)));
+      reasons.forEach((r) => ul.append(el("li", null, r)));
       wrap.append(ul);
     }
     const rows = [...(d.photos || []), ...(d.unexpected || [])];
@@ -393,17 +756,67 @@
       });
       wrap.append(details);
     }
+
+    // 给上层系统对接用：结论可以直接复制走
+    const tools = el("div", "result-tools");
+    const copy = el("button", "ghost", "复制结果 JSON");
+    copy.type = "button";
+    copy.addEventListener("click", () =>
+      copyText(JSON.stringify(raw ?? d, null, 2), "已复制识别结果 JSON"));
+    const again = el("button", "ghost", "重新识别");
+    again.type = "button";
+    again.addEventListener("click", () => $("run").click());
+    tools.append(copy, again);
+    wrap.append(tools);
+
     return wrap;
   }
 
+  function inferProgress(n, startedAt) {
+    const card = el("div", "card");
+    const line = el("div", "progress-line");
+    const text = el("span", null, `正在识别 ${n} 张…`);
+    line.append(el("span", "spin"), text);
+    card.append(line,
+      el("div", "chart-note", "单张通常 1–3 秒；首次请求要加载模型，可能更慢。"));
+    clearInterval(runTimer);
+    runTimer = setInterval(() => {
+      text.textContent = `正在识别 ${n} 张… 已用 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+    }, 200);
+    return card;
+  }
+
+  function inferError(err, startedAt) {
+    const card = el("div", "card result-error");
+    const head = el("div", "result-head");
+    head.append(el("span", "name", `识别失败 · 用时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`),
+      el("span", "tag warn", "未完成"));
+    card.append(head);
+    card.append(el("div", "meta", err.message + (err.requestId ? `（request_id ${err.requestId}）` : "")));
+    const tools = el("div", "result-tools");
+    const retry = el("button", "btn", "重试");
+    retry.type = "button";
+    retry.addEventListener("click", () => $("run").click());
+    const copy = el("button", "ghost", "复制错误信息");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(`${err.message}\nrequest_id=${err.requestId || "-"}`, "已复制"));
+    tools.append(retry, copy);
+    card.append(tools);
+    return card;
+  }
+
   $("run").addEventListener("click", async () => {
-    if (!files.length) return;
+    if (!files.length || $("run").dataset.busy) return;
+    const startedAt = Date.now();
+    $("run").dataset.busy = "1";
     $("run").disabled = true;
-    const label = $("run").textContent;
     $("run").textContent = `识别中…（${files.length} 张）`;
-    $("out").replaceChildren(el("div", "meta", "识别中…"));
+    $("out").replaceChildren(inferProgress(files.length, startedAt));
     const fd = new FormData();
     files.forEach((f) => fd.append("images", f));
+    Object.entries(inferValues[cat] || {}).forEach(([k, v]) => {
+      if (v != null && String(v).trim() !== "") fd.append(k, v);
+    });
     try {
       const body = await api(CATS[cat].path + "?boxes=1", { method: "POST", body: fd });
       scenes = files.map(() => null);
@@ -418,13 +831,24 @@
           : (p.scene === "unknown_scene" || !p.scene) ? "unknown"
           : outside.has(p.index) ? "outside" : null;
       });
+      clearInterval(runTimer);
       drawPreview();
       showInferImage(0);
-      $("out").replaceChildren(renderResult(body));
+      $("out").replaceChildren(renderResult(body, body));
       $("out").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      if (body.degraded) toast("部分照片超时，结果不完整", "bad");
     } catch (err) {
-      $("out").replaceChildren(el("div", "meta", "失败：" + err.message));
-    } finally { $("run").disabled = false; $("run").textContent = label; }
+      clearInterval(runTimer);
+      $("out").replaceChildren(inferError(err, startedAt));
+      if (err.code === "BUSY" || err.code === "RATE_LIMITED") {
+        toast(err.message || "服务繁忙，稍后再试", "bad");
+      }
+    } finally {
+      clearInterval(runTimer);
+      delete $("run").dataset.busy;
+      $("run").disabled = false;
+      $("run").textContent = "识别";
+    }
   });
 
   /* ---------- 大图查看器（一张张点开看） ---------- */
@@ -450,6 +874,8 @@
 
       const img = $("vImg");
       $("vBoxes").replaceChildren();
+      resetBroken(img);
+      img.alt = it.name || "样本大图";
       img.src = it.src;
       await new Promise((r) => { img.onload = r; if (img.complete && img.naturalWidth) r(); });
 
@@ -552,7 +978,8 @@
       cnt.textContent = `共 ${list.length} 批`;
       box.replaceChildren();
       if (!list.length) {
-        box.append(el("div", "meta", "还没有上传过数据集。把按类别建好目录的 zip 拖到上面。"));
+        box.append(emptyState("▤", "还没有上传过数据集",
+          "把按类别建好目录的 zip 拖到上面的上传区，目录名会自动映射到 12 个场景类。"));
         return;
       }
       list.forEach((b) => {
@@ -598,7 +1025,15 @@
 
   async function uploadDataset(file) {
     const out = $("dsResult");
-    out.replaceChildren(el("div", "meta", "上传中…"));
+    const started = Date.now();
+    const line = el("div", "progress-line");
+    const text = el("span", null, `上传中… ${(file.size / 1024 / 1024).toFixed(1)}MB`);
+    line.append(el("span", "spin"), text);
+    out.replaceChildren(line);
+    const tick = setInterval(() => {
+      text.textContent = `上传中… ${(file.size / 1024 / 1024).toFixed(1)}MB · 已用 `
+        + `${((Date.now() - started) / 1000).toFixed(0)}s`;
+    }, 500);
     const fd = new FormData();
     fd.append("file", file);
     try {
@@ -608,10 +1043,11 @@
       const dist = Object.entries(d.classes || {}).map(([k, v]) => `${sname(k)} ${v}`).join("、");
       out.replaceChildren(el("div", "meta",
         `已导入 ${d.images} 张（${(d.bytes / 1024 / 1024).toFixed(1)}MB）：${dist}`));
+      toast(`已导入 ${d.images} 张图片`);
       loadDataset();
     } catch (err) {
-      out.replaceChildren(el("div", "meta", "上传失败：" + err.message));
-    }
+      out.replaceChildren(el("div", "banner", "上传失败：" + err.message));
+    } finally { clearInterval(tick); }
   }
 
   $("dsFile").addEventListener("change", (e) => {
@@ -649,7 +1085,9 @@
     const note = el("div", "meta", `严格折外：${d.oof?.n || 0} 张；每张仅由未见过该工单的模型预测。目录回放结果含训练样本，不用于验收。`);
     box.append(note);
     const t = el("table", "tbl");
-    box.append(t);
+    const twrap = el("div", "tblwrap");
+    twrap.append(t);
+    box.append(twrap);
     const folds = el("div", "seen", `总体 Top-1 ${(d.oof?.top1 * 100).toFixed(2)}% · Top-5 ${(d.oof?.top5 * 100).toFixed(2)}% · 高置信覆盖 ${(d.oof?.auto_coverage * 100).toFixed(1)}% · 覆盖内场景准确率 ${(d.oof?.auto_precision * 100).toFixed(1)}%`);
     box.append(folds);
     const replay = el("details");
@@ -711,9 +1149,13 @@
   }
 
   async function loadMistakes() {
-    $("mGrid").replaceChildren(el("div", "meta", "加载中…"));
+    $("mGrid").replaceChildren(skeleton(5, 26));
+    $("mFoot").replaceChildren();
     try { mData = await api(`/viz/api/mistakes?source=${mSource}`); }
-    catch (err) { $("mGrid").replaceChildren(el("div", "meta", "加载失败：" + err.message)); return; }
+    catch (err) {
+      $("mGrid").replaceChildren(emptyState("!", "误判数据加载失败", err.message, "重试", loadMistakes));
+      return;
+    }
     const box = $("mGroups"); box.replaceChildren();
     (mData.groups || []).forEach((g) => {
       const row = el("div", "cls");
@@ -734,25 +1176,44 @@
       openGroup(first);          // 默认展开最大的一组，避免右侧空白
     } else {
       $("mTitle").textContent = "没有误判样本";
+      $("mGrid").replaceChildren(emptyState("✓", "这个范围没有误判",
+        "换一个数据源看看，或去「快速标注」继续处理待复核样本。"));
     }
   }
 
-  function openGroup(g) {
-    mGroup = g; selected = new Set();
-    $("mSave").disabled = true; $("mRelabel").disabled = true;
-    $("mTarget").value = g.want;
-    $("mTitle").textContent = `${sname(g.want)} → ${sname(g.got)} · ${g.n} 张 · 平均置信度 ${g.avg_conf}`;
+  const M_PAGE = 24;
+  let mShown = 0;
 
+  function renderMFoot() {
+    const foot = $("mFoot");
+    if (!foot) return;
+    foot.replaceChildren();
+    if (!mGroup) return;
+    const total = mGroup.items.length;
+    foot.append(el("span", null,
+      `已选 ${selected.size} / ${total} 张 · 已显示 ${Math.min(mShown, total)} 张`));
+    if (mShown < total) {
+      const more = el("button", "ghost", `加载更多（还有 ${total - mShown} 张）`);
+      more.type = "button";
+      more.addEventListener("click", () => { appendMistakeCards(); renderMFoot(); });
+      foot.append(more);
+    }
+  }
+
+  function appendMistakeCards() {
+    if (!mGroup) return;
     const grid = $("mGrid");
-    grid.replaceChildren();
-    grid.className = "lgrid";          // 复用标注页的卡片网格，避免窄列竖排文字
-
-    g.items.forEach((it, idx) => {
+    const g = mGroup;
+    const slice = g.items.slice(mShown, mShown + M_PAGE);
+    slice.forEach((it) => {
+      const idx = g.items.indexOf(it);
       const card = el("div", "lcard");
+      if (selected.has(it.path)) card.classList.add("sel");
 
       const shot = el("div", "lshot");
       const img = el("img");
       img.loading = "lazy";
+      img.alt = `${it.file}（应为 ${sname(it.want)}，判成 ${sname(it.got)}）`;
       img.src = `/viz/api/file?path=${encodeURIComponent(it.path)}`;
       const overlay = el("div", "boxes");
       shot.append(img, overlay);
@@ -778,11 +1239,14 @@
       const row = el("div", "lrow");
       const chk = el("input", "lpick");
       chk.type = "checkbox";
+      chk.checked = selected.has(it.path);
+      chk.setAttribute("aria-label", `选择 ${it.file}`);
       chk.addEventListener("change", () => {
         if (chk.checked) selected.add(it.path); else selected.delete(it.path);
         card.classList.toggle("sel", chk.checked);
         $("mSave").disabled = selected.size === 0;
         $("mRelabel").disabled = selected.size === 0;
+        renderMFoot();
       });
       row.append(chk,
         el("span", "lpred bad", `判成 ${sname(it.got)}`),
@@ -793,19 +1257,36 @@
       card.append(shot, body);
       grid.append(card);
     });
+    mShown = Math.min(mShown + slice.length, g.items.length);
+  }
+
+  function openGroup(g) {
+    mGroup = g; selected = new Set(); mShown = 0;
+    $("mSave").disabled = true; $("mRelabel").disabled = true;
+    $("mTarget").value = g.want;
+    $("mTitle").textContent = `${sname(g.want)} → ${sname(g.got)} · ${g.n} 张 · 平均置信度 ${g.avg_conf}`;
+
+    const grid = $("mGrid");
+    grid.replaceChildren();
+    grid.className = "lgrid";          // 复用标注页的卡片网格，避免窄列竖排文字
+    appendMistakeCards();
+    renderMFoot();
   }
 
   $("mSelectAll").addEventListener("click", () => {
     if (!mGroup) return;
     const all = selected.size === mGroup.items.length;
+    // 全选针对整组，而不只是已渲染的前 24 张——否则「全选本组」名不副实
     selected = all ? new Set() : new Set(mGroup.items.map((i) => i.path));
-    [...$("mGrid").children].forEach((c) => {
+    [...$("mGrid").children].forEach((c, i) => {
       const chk = c.querySelector("input[type=checkbox]");
+      const path = mGroup.items[i]?.path;
       if (chk) chk.checked = !all;
-      c.style.borderColor = all ? "" : "var(--accent)";
+      c.classList.toggle("sel", !all && !!path && selected.has(path));
     });
     $("mSave").disabled = selected.size === 0;
     $("mRelabel").disabled = selected.size === 0;
+    renderMFoot();
   });
 
   $("mRelabel").addEventListener("click", async () => {
@@ -819,9 +1300,8 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items }),
       });
-      $("mRelabel").textContent = `已加入 ${d.added} 张`;
-      setTimeout(() => { $("mRelabel").textContent = "加入改标计划"; }, 1800);
-    } catch (err) { $("mRelabel").textContent = "失败"; }
+      toast(`已加入改标计划：${d.added} 张（只登记，不搬文件）`);
+    } catch (err) { toast("加入失败：" + err.message, "bad"); }
   });
 
   $("mSave").addEventListener("click", async () => {
@@ -833,9 +1313,8 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items }),
       });
-      $("mSave").textContent = `已登记 ${d.added} 张`;
-      setTimeout(() => { $("mSave").textContent = "登记为难例"; }, 1600);
-    } catch (err) { $("mSave").textContent = "失败"; }
+      toast(`已登记 ${d.added} 张难例`);
+    } catch (err) { toast("登记失败：" + err.message, "bad"); }
   });
 
   $("mSource").addEventListener("click", (e) => {
@@ -890,17 +1369,64 @@
     });
   }
 
+  // 上传批次被重复导入时，同一张图会在队列里出现多次。
+  // 文件名含工单号和时间戳，足够作为去重键；保留置信度最低的那条优先复核。
+  function dedupeQueue(items) {
+    const byFile = new Map();
+    items.forEach((it) => {
+      const key = it.file || it.path;
+      const prev = byFile.get(key);
+      if (!prev || (it.conf ?? 1) < (prev.conf ?? 1)) byFile.set(key, it);
+    });
+    return [...byFile.values()];
+  }
+
+  function labelBanner(d, dup) {
+    const box = $("lBanner");
+    box.replaceChildren();
+    const add = (text, cls) => {
+      const b = el("div", "banner" + (cls ? " " + cls : ""));
+      b.append(el("span", "b-t", text));
+      box.append(b);
+    };
+    if (d?.missing) {
+      add(`${d.missing} 张历史图片的文件已不存在，已从队列跳过。` +
+        "如果是换机部署，先确认 data/ 目录挂载完整。");
+    }
+    if (dup) add(`已自动合并 ${dup} 张重复上传的同一图片（多批上传了相同文件）。`, "info");
+  }
+
   async function loadLabelQueue() {
     lbFam = $("lFam").querySelector(".on")?.dataset.fam || "oil";
     $("lProgress").textContent = "加载中…";
-    const d = await api(`/viz/api/review_queue?source=all&family=${lbFam}&limit=600`);
-    lbItems = d.items || [];
+    $("lBanner").replaceChildren();
+    $("lGrid").replaceChildren(...[0, 1, 2].map(() => {
+      const card = el("div", "lcard");
+      const shot = el("div", "lshot skeleton");
+      shot.style.height = "180px";
+      card.append(shot);
+      return card;
+    }));
+    let d;
+    try {
+      d = await api(`/viz/api/review_queue?source=all&family=${lbFam}&limit=600`);
+    } catch (err) {
+      $("lGrid").replaceChildren();
+      $("lGrid").append(emptyState("!", "待复核队列加载失败", err.message, "重试", loadLabelQueue));
+      $("lProgress").textContent = "—";
+      return;
+    }
+    const rawItems = d.items || [];
+    lbItems = dedupeQueue(rawItems);
+    const dup = rawItems.length - lbItems.length;
     lbShown = 0; lbSelected = new Set();
     updateBatchBar();
     $("lGrid").replaceChildren();
+    labelBanner(d, dup);
     $("lProgress").textContent = `共 ${lbItems.length} 张待复核`;
     if (!lbItems.length) {
-      $("lGrid").append(el("div", "meta", "这个范围没有待复核的图片"));
+      $("lGrid").append(emptyState("✓", "这个范围没有待复核的图片",
+        "换一个分组，或去「错误样本」看看模型判错的样本。"));
       return;
     }
     appendLabelCards();
@@ -931,6 +1457,7 @@
     const shot = el("div", "lshot");
     const img = el("img");
     img.loading = "lazy";
+    img.alt = `${it.file}（预判 ${sname(it.pred)}，原标签 ${sname(it.labeled)}）`;
     img.src = `/viz/api/file?path=${encodeURIComponent(it.path)}`;
     const overlay = el("div", "boxes");
     shot.append(img, overlay);
@@ -1009,7 +1536,7 @@
       });
       if (cardEl) cardEl.style.opacity = ".55";
     } catch (err) {
-      alert("保存失败：" + err.message);
+      toast("保存失败：" + err.message, "bad");
     }
   }
 
@@ -1032,7 +1559,7 @@
       lbSelected = new Set();
       updateBatchBar();
     } catch (err) {
-      alert("批量保存失败：" + err.message);
+      toast("批量保存失败：" + err.message, "bad");
     }
   }
 
@@ -1117,7 +1644,7 @@
             });
             $("modelHint").textContent = `已注册 ${ver}（候选，可切换）`;
             loadModelVersions();
-          } catch (err) { alert("注册失败：" + err.message); }
+          } catch (err) { toast("注册失败：" + err.message, "bad"); }
         });
         $("trStatus").append(btn);
       }
@@ -1144,7 +1671,7 @@
       pollTrain();
     } catch (err) {
       $("trStart").disabled = false;
-      alert("启动失败：" + err.message);
+      toast("启动失败：" + err.message, "bad");
     }
   });
 
@@ -1185,7 +1712,13 @@
       const m = el("td", "num", top1 != null ? `${(top1 * 100).toFixed(2)}%` : "—");
       const sc = v.metrics?.scene || {};
       const scope = sc.note || (sc.val_n ? `单折 ${sc.val_n} 张` : "—");
-      const scopeTd = el("td", "num", scope);
+      const scopeTd = el("td", "num");
+      // “单折 107 张”这种口径不能和 5 折 OOF 比大小，标注出来避免误读
+      if (/单折/.test(scope)) {
+        scopeTd.append(el("span", "tag warn", "不可比"), document.createTextNode(" " + scope));
+      } else {
+        scopeTd.textContent = scope;
+      }
       scopeTd.title = "不同版本的评测集不同，数字不可直接横向比较";
       const when = el("td", "num", (v.created_at || "").replace("T", " ").slice(0, 16));
       const act = el("td");
@@ -1204,7 +1737,7 @@
               : `已切到 ${v.version}，需重启 vision 服务`;
             loadModelVersions();
           } catch (err) {
-            alert("切换失败：" + err.message);
+            toast("切换失败：" + err.message, "bad");
             btn.disabled = false;
           }
         });
@@ -1222,7 +1755,7 @@
             });
             $("modelHint").textContent = `已删除 ${v.version}`;
             loadModelVersions();
-          } catch (err) { alert("删除失败：" + err.message); }
+          } catch (err) { toast("删除失败：" + err.message, "bad"); }
         });
         act.append(del);
       }
@@ -1230,7 +1763,9 @@
       tb.append(tr);
     });
     t.append(tb);
-    box.replaceChildren(t);
+    const wrap = el("div", "tblwrap");
+    wrap.append(t);
+    box.replaceChildren(wrap);
   }
 
   /* ---------- 训练 ---------- */
@@ -1306,6 +1841,13 @@
       const v = mm.runtime_version || mm.configured_version;
       const roles = (mm.configured_roles || []).length;
       if (v) $("modelVersion").textContent = `模型 ${v}` + (roles ? ` · ${roles} 个头` : "");
+      // 上限直接写出来，避免用户一次拖 30 张才发现被拒
+      const lim = m.limits || {};
+      const box = $("inferLimits");
+      if (box && lim.max_photos) {
+        box.textContent = `一次最多 ${lim.max_photos} 张 · 单张 ≤ ${lim.max_image_mb}MB · `
+          + `合计 ≤ ${lim.max_total_mb}MB · 单次超时 ${lim.service_timeout_s}s`;
+      }
     }).catch(() => {
       $("modelVersion").textContent = "模型信息不可用";
     });
@@ -1322,6 +1864,8 @@
       }
     }
     applyMenus(me);
+    renderInferParams();
+    renderInferEmpty();
     loadModelFooter();
     let start = (location.hash || "#overview").slice(1);
     if (allowedViews && !allowedViews.has(start)) {

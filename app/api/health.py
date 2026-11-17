@@ -16,6 +16,7 @@ import json
 
 import httpx
 from fastapi import APIRouter, Response
+from fastapi.responses import PlainTextResponse
 
 from app.config import BASE_DIR, settings
 from app.metrics import metrics
@@ -99,4 +100,12 @@ def meta():
 
 @router.get("/metrics")
 def prometheus_metrics():
-    return metrics.render()
+    """Prometheus 文本格式。
+
+    直接 `return str` 会被 FastAPI 当成 JSON 字符串序列化，
+    结果是带引号、`\n` 转义的 `application/json`，Prometheus 抓取会解析失败。
+    """
+    return PlainTextResponse(
+        metrics.render(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )

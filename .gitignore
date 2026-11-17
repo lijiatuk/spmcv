@@ -9,22 +9,10 @@ var/
 # ---- 数据（体积大，靠 scripts/ 重新生成） ----
 data/
 
-# ---- 模型权重：不进 git，靠 models/current + registry 管理 ----
-*.pt
-models/*/weights/
-models/*/onnx/
-models/pretrained/
 
-# models/ 里这些必须进 git：
-#   models/registry.json
-#   models/*/manifest.json
-#   models/README.md
-!models/registry.json
-!models/*/manifest.json
-!models/README.md
 
 # 含 SSO 凭据
-# .env
+.env
 
 tests/
 scripts/

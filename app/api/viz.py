@@ -49,10 +49,42 @@ def get_labeling_guide():
     return PlainTextResponse(guide.read_text(encoding="utf-8"))
 
 
+def _portable(path_str: str | Path) -> Path:
+    """把旧机器 / 旧容器写死的绝对路径重新挂到当前 ROOT 上。
+
+    评测报告、改标计划、反馈库里存的是导出机器上的绝对路径：
+    开发机是 `/Users/<user>/data/spmcv/data/...`，容器里是 `/app/data/...`。
+    打包换机后这些前缀失效，但文件其实就在当前 ROOT 下。
+    这里从路径尾部由长到短找一个真实存在的候选：`.../data/raw/recut/x.jpg`
+    → `<ROOT>/data/raw/recut/x.jpg`。找不到时原样返回，交给调用方判断。
+    """
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = ROOT / p
+    try:
+        if p.exists():
+            return p
+    except OSError:
+        return p
+    # 只接受从 `data/` 这一段开始的后缀：既避免把 /x/y/同名文件 误挂到 ROOT，
+    # 也覆盖了 `/Users/u/proj/data/...` 里出现两次 data 的情况（取能命中的那个）。
+    parts = p.parts[1:]                      # 去掉文件系统根
+    for i, part in enumerate(parts):
+        if part != "data":
+            continue
+        candidate = ROOT.joinpath(*parts[i:])
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return p
+
+
 def _safe(path_str: str) -> Path:
     """只允许访问白名单目录内的文件。"""
     try:
-        p = Path(path_str).resolve()
+        p = _portable(path_str).resolve()
     except Exception as exc:
         raise HTTPException(400, "路径非法") from exc
     for root in ALLOWED_ROOTS:
@@ -68,7 +100,7 @@ def _dataset_roots() -> list[Path]:
 @router.get("/viz/api/classes")
 def classes(root: str = ""):
     """列出某个数据集根目录下的 12 个类及张数。"""
-    target = Path(root).resolve() if root else (_dataset_roots() or [None])[0]
+    target = _portable(root).resolve() if root else (_dataset_roots() or [None])[0]
     if not target or not target.is_dir():
         raise HTTPException(404, "数据集目录不存在")
     if not any(target == r.resolve() for r in _dataset_roots()):
@@ -87,7 +119,7 @@ def classes(root: str = ""):
 
 @router.get("/viz/api/images")
 def images(dir: str):
-    d = Path(dir).resolve()
+    d = _portable(dir).resolve()
     if not any(d.is_relative_to(r.resolve()) for r in ALLOWED_ROOTS):
         raise HTTPException(403, "目录不在允许范围")
     if not d.is_dir():
@@ -416,8 +448,11 @@ def review_queue(source: str = "new", family: str = "oil",
     if not fam:
         raise HTTPException(400, "family 只能是 oil / arrival / sheet")
 
-    done = feedback_store.latest_paths()
+    # 历史记录里存的是导出机器的绝对路径，比较前统一换算到当前 ROOT，
+    # 否则换机部署后「已复核」集合永远对不上，同一张图会反复出现。
+    done = {str(_portable(p)) for p in feedback_store.latest_paths()}
     out = []
+    missing = 0
     oof_path = ROOT / "docs/reports/verified_oof.json"
     oof = _load_json(oof_path) if oof_path.is_file() else {}
     if oof.get("evaluation") == "strict_grouped_out_of_fold":
@@ -428,8 +463,11 @@ def review_queue(source: str = "new", family: str = "oil",
             source_key = "old" if bucket == "old" else "new"
             if source != "all" and source != source_key:
                 continue
-            path = str(row.get("path") or "")
-            if not path or path in done or not Path(path).is_file():
+            path = str(_portable(row.get("path") or "")) if row.get("path") else ""
+            if not path or path in done:
+                continue
+            if not Path(path).is_file():
+                missing += 1
                 continue
             if row.get("correct") and float(row.get("confidence") or 0) >= 0.85:
                 continue
@@ -457,8 +495,11 @@ def review_queue(source: str = "new", family: str = "oil",
 
     # 新上传批次的自动标注结果也进队列：它们不在评测集里，但同样需要人工确认。
     for r in feedback_store.list_auto_labels(limit=2000):
-        path = r.get("path") or ""
+        path = str(_portable(r.get("path") or "")) if r.get("path") else ""
         if not path or path in done:
+            continue
+        if not Path(path).is_file():
+            missing += 1
             continue
         leaf = Path(path).parent.name          # 上传时按 slug 建目录，目录名就是原标签
         if leaf not in SLUG_SET:
@@ -479,7 +520,7 @@ def review_queue(source: str = "new", family: str = "oil",
         out.sort(key=lambda x: (x["conf"] if x["conf"] is not None else 1))
     return {
         "family": family, "candidates": fam + ["other", "uncertain"],
-        "total": len(out), "done": len(done),
+        "total": len(out), "done": len(done), "missing": missing,
         "evaluation_source": "strict_grouped_out_of_fold" if oof.get("evaluation") else "legacy_directory_replay",
         "items": out[:max(1, min(limit, 2000))],
     }
