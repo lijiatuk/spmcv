@@ -100,7 +100,7 @@ OCR_PROVIDER=rapidocr \
 
 VISION_URL=http://127.0.0.1:8016 \
 OCR_SERVICE_URL=http://127.0.0.1:8018 \
-KEV_URL=http://10.51.13.7:8008/v1/systemone KEV_MODE=fallback \
+KEV_MODE=off USE_VLX=0 \
 MAX_CONCURRENT=4 \
   uvicorn app.main:app --host 127.0.0.1 --port 8017
 ```
@@ -129,7 +129,7 @@ curl -s http://127.0.0.1:8017/v1/workorder \
   -F "expected_odometer=4618" -F "axle_type=hande"
 ```
 
-返回 `auto_approved` / `review_reasons` / `vin`（含各场景 VIN 是否一致）/ `mileage`（5% 偏差）/
+返回 `result`（`pass` 才能自动通过）/ `review_reasons` / `vin`（含各场景 VIN 是否一致）/ `mileage`（5% 偏差）/
 `oil` / `filter` / `service_sign` / `missing_scenes`，以及每张照片的明细。
 
 实现的是规格 Excel 里的跨图规则：
@@ -150,7 +150,9 @@ curl -s http://127.0.0.1:8017/v1/workorder \
 | `POST /v1/repair` | `02_故障及修复照片` | 桥/轮胎 加油或放油、有/无滤芯；`axle_type=hande` 启用汉德桥规则 |
 | `POST /v1/inspection` | `03_项目检查表` | 服务单首页 VIN（可仅尾段）、末页签字与盖章 |
 
-三者都接收同类多张照片，返回 `ok` / `reasons` / `photos` / `unexpected`（传错类的照片）。
+三者都接收同类多张照片，返回 `result` / `reasons` / `photos` / `unexpected`（传错类的照片）。
+`result` 只有三个取值：`pass`（可自动通过）、`partial`（照片不齐，仅 arrival）、`review`（需人工）。
+上层只判这一个字段，不要在客户端重新拼 boolean。
 
 ```bash
 curl -s http://127.0.0.1:8017/v1/arrival \
