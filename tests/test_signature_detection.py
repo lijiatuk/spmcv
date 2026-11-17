@@ -80,3 +80,54 @@ def test_rotation_merges_labels_found_at_different_angles(monkeypatch):
     boxes, angle = analyze._service_sign_boxes(_jpeg(400, 300), "x.jpg")
     assert angle == 270
     assert {b["label"] for b in boxes} == {"service_sheet", "stamp", "signature"}
+
+
+class _StubVLX:
+    def __init__(self, response: dict):
+        self._response = response
+        self.calls = 0
+
+    def recognize(self, data, filename, scene):  # noqa: ARG002
+        self.calls += 1
+        return self._response
+
+
+def test_vlx_fallback_fills_missing_signature(monkeypatch):
+    """本地检测器只有盖章时，VLX 补出签字（中文标签要映射成 signature）。"""
+    monkeypatch.setattr(analyze, "VISION", _StubVision([{"boxes": [
+        {"label": "stamp", "score": 0.90, "box": [10, 10, 50, 50]},
+    ]}]))
+    stub = _StubVLX({"result_bbox_list": [
+        {"label": "客户签字", "xmin": 1, "ymin": 2, "xmax": 30, "ymax": 40},
+        {"label": "服务站盖章", "xmin": 5, "ymin": 6, "xmax": 50, "ymax": 60},
+    ]})
+    monkeypatch.setattr(analyze, "VLX_FALLBACK", stub)
+    monkeypatch.setattr(analyze.settings, "vlx_url", "http://vlx")
+    boxes, _ = analyze._service_sign_boxes(_jpeg(), "x.jpg")
+    assert any(b["label"] == "signature" for b in boxes)
+    assert stub.calls == 1
+
+
+def test_vlx_fallback_skipped_when_detector_has_both(monkeypatch):
+    monkeypatch.setattr(analyze, "VISION", _StubVision([{"boxes": [
+        {"label": "stamp", "score": 0.90, "box": [10, 10, 50, 50]},
+        {"label": "signature", "score": 0.60, "box": [20, 20, 60, 40]},
+    ]}]))
+    stub = _StubVLX({"result_bbox_list": []})
+    monkeypatch.setattr(analyze, "VLX_FALLBACK", stub)
+    monkeypatch.setattr(analyze.settings, "vlx_url", "http://vlx")
+    analyze._service_sign_boxes(_jpeg(), "x.jpg")
+    assert stub.calls == 0
+
+
+def test_vlx_fallback_needs_url(monkeypatch):
+    monkeypatch.setattr(analyze, "VISION", _StubVision([{"boxes": [
+        {"label": "stamp", "score": 0.90, "box": [10, 10, 50, 50]},
+    ]}]))
+    stub = _StubVLX({"result_bbox_list": [
+        {"label": "客户签字", "xmin": 1, "ymin": 2, "xmax": 30, "ymax": 40},
+    ]})
+    monkeypatch.setattr(analyze, "VLX_FALLBACK", stub)
+    monkeypatch.setattr(analyze.settings, "vlx_url", "")
+    analyze._service_sign_boxes(_jpeg(), "x.jpg")
+    assert stub.calls == 0

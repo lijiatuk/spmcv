@@ -192,8 +192,13 @@ make lan        # 等价于 HOST=0.0.0.0 bash scripts/serve_dev.sh
 ## 8. 部署到服务器
 
 ```bash
+bash deploy/package.sh          # 升级包 ~80MB（代码 + 模型，不含 data/）
+bash deploy/package.sh --with-data   # 首次部署 ~430MB（带 data/ 照片与划分）
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
+
+`data/` 和 `var/` 只保留目录骨架，照片与训练产物不重复打包：
+首次部署用 `--with-data` 或 `rsync -av data/ 服务器:/opt/spmcv/data/` 同步一次，之后升级都发小包。
 
 访问 `http://<服务器IP>:8080/ui/`；Nginx 限流 + 2 API workers + GPU vision + 2 OCR workers。
 
@@ -291,6 +296,8 @@ A/B 实测（同一服务只切开关）：正常照片**零回归**，模拟背
 ## 12. 运行模式与限制
 
 - 默认 `USE_VLX=0`：场景分类 + 6 类动作模型 + 检测器 + OCR + 规则，本地闭环。
+- 末页签字/盖章另有**兜底**：检测器缺项时调 VLX（`VLX_URL` 可达且 `VLX_SIGN_FALLBACK=1`，默认开），
+  只补缺的那一项，超时/失败自动忽略；实测 34 张检测器没见过的末页，签字 22/34 → 33/34。
 - 油类/滤芯先用场景分类定位，再由动作模型细化；两者冲突时给结论 + 复核。
 - 置信度 < 0.85 时仍返回建议动作，但 `need_review=true`，交给人工确认。
 - 需要更强证据时可 `USE_VLX=1`：低置信场景调用 VLX ROI（延迟 +2–7 s）。

@@ -29,6 +29,8 @@ VISION = VisionClient(settings.vision_url, settings.scene_timeout,
                       settings.detect_timeout)
 OCR = OCRClient(settings.ocr_service_url, settings.ocr_timeout)
 VLX = VLXClient(settings.vlx_url, 10.0)
+# 兜底用的短超时：VLX 慢的时候（实测 P95 5s+）宁可放弃，不要让末页卡住
+VLX_FALLBACK = VLXClient(settings.vlx_url, 4.0)
 KEV = KevJudge()
 SEM = asyncio.Semaphore(settings.max_concurrent)
 
@@ -115,12 +117,19 @@ def _label_boxes(raw: dict) -> list[dict]:
     return out
 
 
-def _service_sign_boxes(data: bytes, filename: str) -> tuple[list[dict], int | None]:
-    """末页签字/盖章：低阈值检测 + 旋转兜底。
+def _service_sign_boxes(data: bytes, filename: str,
+                        deadline: float | None = None) -> tuple[list[dict], int | None]:
+    """末页签字/盖章：低阈值检测 + 旋转兜底 + VLX 兜底。
 
     返回 (boxes, rotated)。boxes 里的坐标始终是**原图**坐标，
     旋转兜底命中的框会映射回来，前端画框不会错位。
+
+    ``deadline`` 是 time.monotonic() 的绝对截止时间（来自单图分析预算）。
+    旋转和 VLX 都要额外网络/编码开销，预算不够就跳过，避免把整张图拖到超时。
     """
+    def left() -> float:
+        return 1e9 if deadline is None else deadline - time.monotonic()
+
     def scan(payload: bytes) -> list[dict]:
         try:
             return _label_boxes(VISION.detect(payload, filename, "", SIGN_CONF))
@@ -148,6 +157,8 @@ def _service_sign_boxes(data: bytes, filename: str) -> tuple[list[dict], int | N
     # 不能一命中就 break：转了 90° 可能只找到盖章，签字要转到 270° 才出来。
     used_angle = None
     for angle in (90, 270):
+        if left() < 1.2:
+            break
         try:
             alt = scan(_rotate_image(data, angle))
         except Exception:
@@ -167,7 +178,39 @@ def _service_sign_boxes(data: bytes, filename: str) -> tuple[list[dict], int | N
             used_angle = angle
         if not missing:
             break
+    if missing and left() > 1.0:
+        boxes = boxes + _vlx_sign_boxes(data, filename, min(4.0, left() - 0.3))
     return boxes, used_angle
+
+
+VLX_LABELS = {"客户签字": "signature", "服务站盖章": "stamp",
+              "签字": "signature", "盖章": "stamp"}
+
+
+def _vlx_sign_boxes(data: bytes, filename: str, timeout: float = 4.0) -> list[dict]:
+    """末页签字/盖章兜底：VLX 只补本地检测器缺的那一项。
+
+    实测（34 张检测器没见过的末页）：本地 30/34 签字，VLX 33/34；
+    但 VLX 在没签字的首页上会误报约 10%，所以**只在缺项时调用**，
+    且失败/超时一律忽略，不影响主链路。
+    """
+    if not settings.vlx_sign_fallback or not settings.vlx_url:
+        return []
+    try:
+        base_timeout = getattr(VLX_FALLBACK, "timeout", 0.0)
+        client = VLX_FALLBACK if timeout >= base_timeout else VLXClient(settings.vlx_url, timeout)
+        resp = client.recognize(data, filename, "service_sign")
+    except Exception:  # noqa: BLE001 - 兜底失败不能影响主结果
+        return []
+    out = []
+    for b in resp.get("result_bbox_list") or []:
+        label = VLX_LABELS.get(str(b.get("label") or "").strip())
+        if not label:
+            continue
+        out.append({"label": label, "score": 0.0, "source": "vlx",
+                    "box": [float(b.get("xmin") or 0), float(b.get("ymin") or 0),
+                            float(b.get("xmax") or 0), float(b.get("ymax") or 0)]})
+    return out
 
 
 DET_SLUG = [
@@ -217,7 +260,9 @@ def _rotate_image(data: bytes, angle: int) -> bytes:
     if angle:
         img = img.rotate(angle, expand=True)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    # PNG 在 2000px 以上的手机上会到 16MB，直接超过 vision 服务 15MB 上限，
+    # 旋转兜底会静默失败（表现为"转了也没用"）。统一用 JPEG q92。
+    img.save(buf, format="JPEG", quality=92)
     return buf.getvalue()
 
 
@@ -611,7 +656,8 @@ def _resolve_action(slug: str, data: bytes, filename: str, confidence: float,
 
 
 def _character(slug: str, data: bytes, filename: str,
-               alt_data: bytes | None = None) -> dict:
+               alt_data: bytes | None = None,
+               deadline: float | None = None) -> dict:
     meta = BY_SLUG[slug]
     scene = meta["scene"]
     reasons: list[str] = []
@@ -655,14 +701,18 @@ def _character(slug: str, data: bytes, filename: str,
                 "review_reasons": [],
                 "statement": vlx.get("message") or "服务单末页检测完成",
             }
-        raw_boxes, rotated = _service_sign_boxes(data, filename)
+        raw_boxes, rotated = _service_sign_boxes(data, filename, deadline)
         boxes = [{"label": b["label"], "score": round(b["score"], 4),
+                  "source": b.get("source", "detector"),
                   "xmin": b["box"][0], "ymin": b["box"][1],
                   "xmax": b["box"][2], "ymax": b["box"][3]}
                  for b in raw_boxes]
-        has_sig = any(b["label"] == "signature" and b["score"] >= SIGN_CONF
+        # VLX 兜底框没有检测分数，按「已确认」处理，不再过阈值
+        has_sig = any(b["label"] == "signature"
+                      and (b.get("source") == "vlx" or b["score"] >= SIGN_CONF)
                       for b in raw_boxes)
-        has_stamp = any(b["label"] == "stamp" and b["score"] >= STAMP_CONF
+        has_stamp = any(b["label"] == "stamp"
+                        and (b.get("source") == "vlx" or b["score"] >= STAMP_CONF)
                         for b in raw_boxes)
         reasons = []
         if not has_sig:
@@ -906,9 +956,12 @@ async def analyze_bytes(data: bytes, filename: str = "image.png",
                     result["review_reasons"].append(act_reason)
                     result["need_review"] = True
             else:
+                # 单图预算剩余时间交给末页逻辑：旋转/VLX 兜底不能把整张图拖超时
+                budget_left = settings.request_deadline_s - (time.time() - t0) - 0.8
                 result = await asyncio.to_thread(
                     _character, slug, data, filename,
-                    cls_data if pre_report.get("applied") else None)
+                    cls_data if pre_report.get("applied") else None,
+                    time.monotonic() + max(0.5, budget_left))
             result.update({
                 "scene_confidence": scene.get("confidence"),
                 "scene_top5": scene.get("top5"),

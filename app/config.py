@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     vlx_url: str = ""
 
     use_vlx: bool = False
+    # 末页签字/盖章兜底：本地检测器缺项且 VLX_URL 可达时，调 VLX 补一次。
+    # 只影响 service_sign，不改变其它场景的判定链路。
+    vlx_sign_fallback: bool = True
     max_concurrent: int = 4
     # 分级超时：120s 一把梭会让一个慢 OCR 挂满连接池
     scene_timeout: float = 5.0
