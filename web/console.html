@@ -22,6 +22,7 @@
       <a class="nav-item" href="#infer" data-view="infer"><span class="ico">▣</span>在线识别</a>
       <a class="nav-item" href="#model" data-view="model"><span class="ico">◈</span>模型版本</a>
       <a class="nav-item" href="#dataset" data-view="dataset"><span class="ico">▤</span>数据集</a>
+      <a class="nav-item" href="/docs" target="_blank" rel="noopener"><span class="ico">↗</span>接口文档</a>
     </div>
     <div class="nav-group">
       <i>质量</i>
@@ -50,13 +51,13 @@
         <div class="kpis" id="kpis"></div>
         <div class="row">
           <div class="card">
-            <div class="card-head"><span class="t">各类准确率</span>
-              <div class="seg"><button class="on" data-eval="new">新数据</button><button data-eval="old">老数据</button></div>
+            <div class="card-head"><span class="t" id="accTitle">各类照片识别准确率</span>
+              <span class="hint" id="accHint">留出数据 · 未参与训练</span>
             </div>
             <div id="accChart"></div>
           </div>
           <div class="card">
-            <div class="card-head"><span class="t">服务状态</span><span class="pill ok" id="modelsOnline">—</span></div>
+            <div class="card-head"><span class="t">模型状态</span><span class="pill ok" id="modelsOnline">—</span></div>
             <div id="modelList"></div>
           </div>
         </div>
@@ -114,7 +115,27 @@
         <div class="card" style="margin-top:14px">
           <div class="card-head"><span class="t">已上传批次</span>
             <span class="hint" id="dsCount">—</span></div>
+          <div id="dsBanner"></div>
           <div id="dsBatches"></div>
+        </div>
+
+        <div class="card" id="dsDetailCard" style="margin-top:14px" hidden>
+          <div class="card-head">
+            <span class="t" id="dsDetailTitle">批次详情</span>
+            <div class="acts">
+              <span class="hint" id="dsDetailStats"></span>
+              <button class="ghost" id="dsDetailClose">关闭</button>
+            </div>
+          </div>
+          <div class="hint" style="margin-bottom:10px">
+            每张图下面是模型预标注；改完点「保存修改」。训练数据集会优先使用人工确认的标签。
+          </div>
+          <div id="dsDetailBody"></div>
+          <div class="batchbar" id="dsDetailBar" hidden>
+            <span id="dsDetailChanged">已修改 0 张</span>
+            <button class="btn" id="dsDetailSave" style="padding:5px 14px;font-size:12px">保存修改</button>
+            <button class="ghost" id="dsDetailReset">撤销未保存</button>
+          </div>
         </div>
       </section>
 
@@ -185,19 +206,25 @@
         <div class="card" style="margin-bottom:14px">
           <div class="card-head"><span class="t">训练</span>
             <span class="hint">训练会吃满 CPU/GPU，同一时间只跑一个任务</span></div>
+          <div class="hint" style="margin-bottom:8px">
+            数据会按工单整组切成 训练 70% / 验证 15% / 测试 15%；测试集只用于训练后的验收，不参与调参。
+          </div>
           <div class="trainform">
-            <label>数据
+            <label>训练数据
               <select id="trData"></select>
             </label>
-            <label>epochs
+            <label>训练轮数
               <input id="trEpochs" type="number" min="1" max="200" value="25">
             </label>
-            <label>imgsz
+            <label>输入尺寸
               <input id="trImgsz" type="number" min="256" max="1024" step="32" value="512">
             </label>
             <button class="btn" id="trStart">开始训练</button>
+            <button class="ghost" id="trBuild">准备训练集</button>
+            <button class="ghost" id="trCleanTests">清理测试记录</button>
             <button class="ghost" id="trCancel" hidden>取消</button>
           </div>
+          <div id="trDataInfo" class="meta" style="margin-top:8px"></div>
           <div id="trStatus" class="trainstatus"></div>
         </div>
 

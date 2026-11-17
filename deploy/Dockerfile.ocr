@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+# 国内构建默认走清华源；服务器在海外可 --build-arg PIP_INDEX=https://pypi.org/simple
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+WORKDIR /app
+# Debian 官方源在国内很慢（实测 apt 卡了 6 分钟）。换阿里云镜像，
+# 服务器在海外时用 --build-arg APT_MIRROR=deb.debian.org 还原。
+ARG APT_MIRROR=mirrors.aliyun.com
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/requirements-base.txt deploy/requirements-ocr.txt /tmp/
+RUN pip install --no-cache-dir --timeout 60 --retries 5 \
+        -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED_HOST" \
+        -r /tmp/requirements-base.txt -r /tmp/requirements-ocr.txt
+RUN python -c "from rapidocr import RapidOCR, ModelType, OCRVersion; RapidOCR(); RapidOCR(params={'Rec.model_type': ModelType.SERVER, 'Rec.ocr_version': OCRVersion.PPOCRV5})"
+COPY app ./app
+COPY web ./web
+EXPOSE 8018
+CMD ["uvicorn", "app.services.ocr_service:app", "--host", "0.0.0.0", "--port", "8018", "--workers", "2"]

@@ -2,23 +2,21 @@ __pycache__/
 *.pyc
 .DS_Store
 .cache/
+.pytest_cache/
+.ruff_cache/
 
 # ---- 运行产物 ----
 var/
-
-# ---- 数据（体积大，靠 scripts/ 重新生成） ----
 data/
 
+# ---- 文档：只跟踪说明，评测报告是运行产物 ----
+docs/*
+!docs/*.md
+docs/reports/
 
+# ---- 工具：只跟踪脚本，不跟踪 node_modules ----
+tools/*
+!tools/*.mjs
 
 # 含 SSO 凭据
-.env
-
-tests/
-scripts/
-docs/
-deploy/
-tools/
-examples/
-
 .env

@@ -79,6 +79,10 @@ models-verify:
 up:
 	docker compose -f deploy/docker-compose.yml up -d --build
 
+## 一条命令升级（校验 + 构建 + 健康检查）
+upgrade:
+	bash deploy/upgrade.sh
+
 down:
 	docker compose -f deploy/docker-compose.yml down
 

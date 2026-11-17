@@ -1,0 +1,17 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+p.on("pageerror", e => console.log("[pageerror]", String(e).slice(0,200)));
+p.on("console", m => { if (m.type()==="error") console.log("[console]", m.text().slice(0,200)); });
+await p.goto("http://127.0.0.1:8017/ui/console.html#infer", { waitUntil: "networkidle" });
+await p.setInputFiles("#files", ["/tmp/front_plate.png", "/tmp/frame_vin.png"]);
+await p.waitForSelector("#inferImgWrap:not([hidden])");
+await p.click("#run");
+await p.waitForSelector("#out .card", { timeout: 180000 });
+await p.waitForTimeout(2000);
+await p.screenshot({ path: "/tmp/ui_shots/16_two_photos.png" });
+console.log("head:", (await p.textContent("#out .name")));
+console.log("stats:", (await p.textContent("#out .stats")));
+console.log("vin:", (await p.textContent(".vinbox").catch(()=>"无")));
+console.log("reasons:", (await p.textContent("#out .tips").catch(()=>"无")));
+await b.close();

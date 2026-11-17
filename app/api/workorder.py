@@ -6,6 +6,7 @@ import time
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.analyze import analyze_bytes
+from app.api.categories import reason_codes
 from app.config import settings
 from app.limits import read_images
 from app.metrics import metrics
@@ -88,6 +89,7 @@ async def workorder(images: list[UploadFile] = File(...),
         "auto_approved": summary["auto_approved"],
         "need_review": summary["need_review"],
         "review_reasons": summary["review_reasons"],
+        "codes": reason_codes(summary["review_reasons"]),
         "vin": summary["vin"],
         "mileage": summary["mileage"],
         "plate": summary["plate"],

@@ -1,0 +1,10 @@
+# 三个服务共用 app/config.py，所以基础依赖必须一致。
+# 之前的坑：api 漏 numpy、ocr 漏 httpx/pydantic-settings，容器启动即崩。
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+httpx==0.28.1
+pillow==11.0.0
+numpy==2.2.1
+pydantic==2.10.4
+pydantic-settings==2.7.0

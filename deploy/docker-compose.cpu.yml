@@ -1,0 +1,20 @@
+# 本机 / 无 GPU 机器上的验证用覆盖文件：
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.cpu.yml up -d --build
+#
+# 用途：在没有 NVIDIA 卡的机器上把三个服务完整跑起来，验证接口与部署形态。
+# 性能不代表生产（CPU 推理比 L20 慢一个量级），只用于功能验收。
+services:
+  vision:
+    build:
+      args:
+        VISION_BASE: python:3.11-slim
+    environment:
+      VISION_DEVICE: cpu
+    deploy:
+      resources:
+        reservations:
+          devices: []
+
+  api:
+    environment:
+      REQUEST_DEADLINE_S: ${REQUEST_DEADLINE_S:-15}

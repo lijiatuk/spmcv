@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+# 国内构建默认走清华源；服务器在海外可 --build-arg PIP_INDEX=https://pypi.org/simple
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+# 1 = 带上 ultralytics/torch，页面上可以直接发起训练（镜像 ~1.5GB）
+# 0 = 只做服务，镜像 392MB；训练改用 vision 容器
+ARG WITH_TRAIN=1
+WORKDIR /app
+
+# 带训练能力时也会 import cv2（ultralytics 依赖），同样需要这些库
+ARG APT_MIRROR=mirrors.aliyun.com
+RUN sed -i "s|archive.ubuntu.com|${APT_MIRROR}|g; s|security.ubuntu.com|${APT_MIRROR}|g; s|deb.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/requirements-base.txt deploy/requirements-api.txt deploy/requirements-vision.txt /tmp/
+RUN pip install --no-cache-dir --timeout 60 --retries 5 \
+        -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED_HOST" \
+        -r /tmp/requirements-base.txt -r /tmp/requirements-api.txt \
+    && if [ "$WITH_TRAIN" = "1" ]; then \
+         pip install --no-cache-dir --timeout 120 --retries 5 \
+           -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED_HOST" \
+           -r /tmp/requirements-vision.txt; \
+       fi
+COPY app ./app
+COPY web ./web
+COPY scripts ./scripts
+COPY app/scenes.json ./app/scenes.json
+EXPOSE 8017
+# 单 worker：准入信号量、限流桶、/metrics、训练任务句柄都是进程内状态。
+# 2 个 worker 会让实际并发翻倍、指标随机丢一半，训练状态也只在其中一个 worker 里。
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8017", "--workers", "1"]

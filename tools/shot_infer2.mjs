@@ -1,0 +1,12 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+await p.goto("http://127.0.0.1:8017/ui/console.html#infer", { waitUntil: "networkidle" });
+await p.setInputFiles("#files", ["/tmp/frame_vin.png"]);
+await p.waitForSelector("#inferImgWrap:not([hidden])");
+await p.click("#run");
+await p.waitForSelector("#out .card", { timeout: 120000 });
+await p.waitForTimeout(1200);
+await p.screenshot({ path: "/tmp/ui_shots/13_infer_user.png" });
+console.log("vinbox:", (await p.textContent(".vinbox").catch(()=>"(无)")));
+await b.close();

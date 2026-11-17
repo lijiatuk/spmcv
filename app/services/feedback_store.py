@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import BASE_DIR
+from app.services.paths import portable_path
 
 
 class FeedbackStore:
@@ -303,6 +304,13 @@ class FeedbackStore:
         with self.connect() as db:
             return [dict(r) for r in db.execute(sql, (*args, max(1, min(limit, 5000))))]
 
+    def auto_label_batches(self) -> dict[str, int]:
+        """每个批次的自动标注条数，用来发现“目录已删、记录还在”的孤儿批次。"""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT batch, COUNT(*) FROM auto_labels GROUP BY batch").fetchall()
+        return {row[0]: row[1] for row in rows if row[0]}
+
     def auto_label_stats(self, batch: str) -> dict:
         with self.connect() as db:
             row = db.execute(
@@ -312,6 +320,80 @@ class FeedbackStore:
         return {"labeled": row["n"] or 0,
                 "avg_confidence": round(row["avg_conf"], 4) if row["avg_conf"] else None,
                 "high_confidence": row["hi"] or 0}
+
+    # ---------- 上传批次的删除与人工改标 ----------
+
+    def annotations_for_batch(self, batch: str) -> dict[str, dict]:
+        """返回 {image_path: annotation}，供数据集详情显示人工结论。"""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM annotations WHERE source_dataset = ? "
+                "OR image_path LIKE ?", (batch, f"%/{batch}/%")).fetchall()
+        return {row["image_path"]: dict(row) for row in rows}
+
+    def set_manual_labels(self, batch: str, items: list[dict],
+                          reviewer: str = "") -> int:
+        """人工确认/修正上传批次的标签。"""
+        n = 0
+        now = self.now()
+        with self.connect() as db:
+            for item in items:
+                path = str(item.get("path") or "")
+                label = str(item.get("label") or "")
+                if not path or not label:
+                    continue
+                row = db.execute(
+                    "SELECT prediction, confidence, model_version FROM auto_labels "
+                    "WHERE image_path = ?", (path,)).fetchone()
+                auto = dict(row) if row else {}
+                db.execute("""INSERT INTO annotations(image_path,source_dataset,source_label,
+                    model_prediction,model_confidence,final_label,status,note,evidence_status,
+                    action_evidence,reviewer,model_version,taxonomy_version,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(image_path) DO UPDATE SET
+                    source_dataset=excluded.source_dataset,source_label=excluded.source_label,
+                    model_prediction=excluded.model_prediction,
+                    model_confidence=excluded.model_confidence,final_label=excluded.final_label,
+                    status=excluded.status,note=excluded.note,
+                    evidence_status=excluded.evidence_status,reviewer=excluded.reviewer,
+                    model_version=excluded.model_version,updated_at=excluded.updated_at""",
+                    (path, batch, str(item.get("source_label") or ""),
+                     str((auto or {}).get("prediction") or ""),
+                     (auto or {}).get("confidence"), label, "reviewed",
+                     str(item.get("note") or "人工确认标签"), "visible", "unclear",
+                     reviewer, str((auto or {}).get("model_version") or ""), "v1", now))
+                self._event(db, path, "annotation.upsert",
+                            {"path": path, "label": label, "batch": batch}, reviewer)
+                n += 1
+        return n
+
+    def delete_batch(self, batch: str) -> dict:
+        """删除一个上传批次的所有派生记录（文件由调用方删除）。
+
+        旧版本只删目录、不删 auto_labels，换机/删批次后队列里会一直报
+        「N 张历史图片的文件已不存在」。这里按路径后缀匹配，兼容历史
+        导出机器留下的绝对路径前缀。"""
+        like = f"%/{batch}/%"
+        with self.connect() as db:
+            auto = db.execute("DELETE FROM auto_labels WHERE batch = ? OR image_path LIKE ?",
+                              (batch, like)).rowcount
+            ann = db.execute("DELETE FROM annotations WHERE source_dataset = ? OR image_path LIKE ?",
+                             (batch, like)).rowcount
+            plan = db.execute("DELETE FROM relabel_plan WHERE src LIKE ?", (like,)).rowcount
+            hard = db.execute("DELETE FROM hard_cases WHERE path LIKE ?", (like,)).rowcount
+            self._event(db, f"batch:{batch}", "dataset.delete",
+                        {"batch": batch, "auto_labels": auto, "annotations": ann,
+                         "relabel_plan": plan, "hard_cases": hard}, "")
+        return {"auto_labels": auto, "annotations": ann,
+                "relabel_plan": plan, "hard_cases": hard}
+
+    def prune_missing_auto_labels(self) -> int:
+        """清掉文件已不存在的自动标注记录，返回删除条数。"""
+        with self.connect() as db:
+            rows = db.execute("SELECT image_path FROM auto_labels").fetchall()
+            missing = [row[0] for row in rows if not portable_path(row[0]).is_file()]
+            for path in missing:
+                db.execute("DELETE FROM auto_labels WHERE image_path = ?", (path,))
+        return len(missing)
 
     def import_legacy_plan(self, path: Path) -> None:
         if not path.is_file():

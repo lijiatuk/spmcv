@@ -1,0 +1,28 @@
+# GPU（生产，服务器）: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+# CPU（本机/无卡机器验证）: 用 --build-arg VISION_BASE=python:3.11-slim
+ARG VISION_BASE=pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+FROM ${VISION_BASE}
+
+# 国内构建默认走清华源；服务器在海外可 --build-arg PIP_INDEX=https://pypi.org/simple
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+WORKDIR /app
+
+# CUDA runtime 基础镜像里没有 OpenCV 需要的系统库，缺了会报
+#   ImportError: libxcb.so.1: cannot open shared object file
+# （ultralytics -> cv2 -> libxcb/libGL）。这几个库很小，必须装。
+ARG APT_MIRROR=mirrors.aliyun.com
+RUN sed -i "s|archive.ubuntu.com|${APT_MIRROR}|g; s|security.ubuntu.com|${APT_MIRROR}|g; s|deb.debian.org|${APT_MIRROR}|g" \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/requirements-base.txt deploy/requirements-vision.txt /tmp/
+RUN pip install --no-cache-dir --timeout 60 --retries 5 \
+        -i "$PIP_INDEX" --trusted-host "$PIP_TRUSTED_HOST" \
+        -r /tmp/requirements-base.txt -r /tmp/requirements-vision.txt
+COPY app ./app
+COPY web ./web
+EXPOSE 8016
+CMD ["uvicorn", "app.services.vision_service:app", "--host", "0.0.0.0", "--port", "8016"]

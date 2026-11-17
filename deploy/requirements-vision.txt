@@ -1,0 +1,2 @@
+# 基础依赖见 requirements-base.txt
+ultralytics==8.3.40

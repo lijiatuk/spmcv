@@ -66,9 +66,29 @@ def _action(item: dict | None) -> str | None:
     return ((item or {}).get("conclusion") or {}).get("action")
 
 
+ARRIVAL_SCENE_ORDER = ("arrival_plate", "license_vin", "frame_vin", "odometer")
+ARRIVAL_SCENE_LABEL = {
+    "arrival_plate": "车头及车牌照片",
+    "license_vin": "行驶证照片",
+    "frame_vin": "车架铭牌照片",
+    "odometer": "里程表照片",
+}
+
+
 def summarize_arrival(items: list[dict], expected_plate: str = "",
-                      expected_odometer: float | None = None) -> dict:
-    """接车四件套：车牌、双 VIN、里程。"""
+                      expected_odometer: float | None = None,
+                      require_complete: bool = False) -> dict:
+    """接车四件套：车牌、双 VIN、里程。
+
+    只判断**实际提交了**的照片：单拍一张车头照时，不会因为「没交行驶证/
+    里程表」而把这张好图判成复核。缺哪些照片放在 ``missing_scenes``，
+    整单校验由 ``require_complete=True`` 或 ``/v1/workorder`` 负责。
+
+    这样区分了三种情况，人工看到的提示才不会误导：
+      - 没交这类照片       → ``missing_scenes``（软提示，不阻断单张判定）
+      - 交了但 OCR 没读到 → ``reasons``（这张照片有问题）
+      - 读到了但不一致     → ``reasons``（跨图冲突）
+    """
     plate_item = _first(items, "arrival_plate")
     lic = _first(items, "license_vin")
     frame = _first(items, "frame_vin")
@@ -80,6 +100,10 @@ def summarize_arrival(items: list[dict], expected_plate: str = "",
     raw_lic = _norm(_fields(lic).get("vin")) or None
     raw_frame = _norm(_fields(frame).get("vin")) or None
     odometer = _fields(odo).get("odometer")
+
+    present = [it.get("scene") for it in (plate_item, lic, frame, odo) if it]
+    missing = [s for s in ARRIVAL_SCENE_ORDER if s not in present]
+    missing_reasons = [f"未提交{ARRIVAL_SCENE_LABEL[s]}" for s in missing]
 
     reasons: list[str] = []
     # 把「没读到」和「读到了但校验位不过」分开说：前者是拍摄问题，后者是错字，
@@ -93,13 +117,14 @@ def summarize_arrival(items: list[dict], expected_plate: str = "",
     hints: list[str] = []
     if not plate:
         hints.append("未识别到车牌，已按规格跳过车牌校验")
-    if not vin_lic and not bad_lic:
+    # 只有「交了这张照片」才把读不出字段算问题；没交的照片进 missing_scenes。
+    if lic is not None and not vin_lic and not bad_lic:
         reasons.append("未识别到行驶证 VIN")
-    if not vin_frame and not bad_frame:
+    if frame is not None and not vin_frame and not bad_frame:
         reasons.append("未识别到车架 VIN")
     if vin_lic and vin_frame and vin_lic != vin_frame:
         reasons.append(f"VIN 不一致：{vin_lic} ≠ {vin_frame}")
-    if odometer is None:
+    if odo is not None and odometer is None:
         reasons.append("未识别到里程")
 
     # 规格：车牌与工单不一致 → 不进入自动审核
@@ -118,13 +143,26 @@ def summarize_arrival(items: list[dict], expected_plate: str = "",
             reasons.append(
                 f"里程与工单相差 {diff:.1%}（识别 {odometer}，工单 {expected_odometer}），超过 5%")
 
-    # 两个 VIN 都在且一致才算"对上了"；只有一个时视为不完整
+    # 两个 VIN 都在且一致才算"整单对上了"；只有一个时说明不完整，不算冲突。
     vin_ok = bool(vin_lic and vin_frame and vin_lic == vin_frame)
-    present = [it.get("scene") for it in (plate_item, lic, frame, odo) if it]
+    complete = not missing and vin_ok
+    if require_complete:
+        reasons.extend(missing_reasons)
+
+    final_reasons = dedupe(reasons)
+    ok = not final_reasons
+    if not ok:
+        status = "review"
+    elif complete:
+        status = "pass"
+    else:
+        status = "partial"
 
     return {
         "category": "arrival",
-        "ok": not reasons and vin_ok,
+        "ok": ok,
+        "complete": complete,
+        "status": status,
         "plate": plate,
         "vin": {"license": vin_lic, "frame": vin_frame, "match": vin_ok,
                 # 供人工核对：校验位不过的原始读数
@@ -132,7 +170,9 @@ def summarize_arrival(items: list[dict], expected_plate: str = "",
                 "frame_unverified": raw_frame if bad_frame else None},
         "odometer": odometer,
         "present": present,
-        "reasons": dedupe(reasons),
+        "missing_scenes": missing,
+        "missing_reasons": missing_reasons,
+        "reasons": final_reasons,
         "hints": dedupe(hints),
     }
 

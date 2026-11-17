@@ -1,0 +1,14 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+const errs = [];
+p.on("pageerror", e => errs.push(String(e).slice(0, 200)));
+p.on("console", m => { if (m.type() === "error") errs.push(m.text().slice(0, 200)); });
+await p.goto("http://127.0.0.1:8017/ui/console.html#model", { waitUntil: "networkidle" });
+await p.waitForSelector("#modelTable table");
+await p.waitForTimeout(1500);
+console.log("数据选项:", await p.locator("#trData option").count());
+console.log("状态区:", (await p.textContent("#trStatus")).slice(0, 80));
+await p.screenshot({ path: "/tmp/audit/30_train.png" });
+console.log(errs.length ? "错误: " + errs.join(" | ") : "无 JS 报错");
+await b.close();

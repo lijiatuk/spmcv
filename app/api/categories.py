@@ -154,8 +154,13 @@ def _briefs(items: list[dict]) -> list[dict]:
 
 @router.post("/arrival")
 async def arrival(images: list[UploadFile] = File(...), boxes: bool = False,
-                  expected_plate: str = Form(""), expected_odometer: str = Form("")):
+                  expected_plate: str = Form(""), expected_odometer: str = Form(""),
+                  strict: bool = Form(False)):
     """接车照片：车牌、行驶证与车架 VIN、里程。
+
+    默认只校验本次**实际提交**的照片：只传一张车头照时，不会因为没传
+    行驶证/里程表而报「未识别到 VIN」。需要整单四件套齐备才能通过时，
+    传 `strict=1`（或改用 `/v1/workorder`）。
 
     按规格支持工单比对：`expected_plate` 车牌一致性、`expected_odometer` 里程误差 ≤5%。
     """
@@ -168,10 +173,12 @@ async def arrival(images: list[UploadFile] = File(...), boxes: bool = False,
             raise HTTPException(422, detail={"code": "INVALID_PARAMS",
                                              "message": "expected_odometer 必须是数字"})
     out = summarize_arrival(inside, expected_plate=expected_plate,
-                            expected_odometer=odo_expect)
+                            expected_odometer=odo_expect,
+                            require_complete=bool(strict))
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
     out["need_review"] = not out["ok"]
+    out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
     return out
 
@@ -190,6 +197,7 @@ async def repair(images: list[UploadFile] = File(...),
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
     out["need_review"] = not out["ok"]
+    out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
     return out
 
@@ -204,6 +212,7 @@ async def inspection(images: list[UploadFile] = File(...),
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
     out["need_review"] = not out["ok"]
+    out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
     return out
 
@@ -293,6 +302,7 @@ async def scan(
     expected_vin: str = Form(""),
     expected_plate: str = Form(""),
     expected_odometer: str = Form(""),
+    strict: bool = Form(False),
     boxes: bool = False,
 ):
     """对外统一入口：1..N 张图 + 可选 category。
@@ -334,7 +344,8 @@ async def scan(
                 raise HTTPException(422, detail={"code": "INVALID_PARAMS",
                                                  "message": "expected_odometer 必须是数字"})
         summary = summarize_arrival(inside, expected_plate=expected_plate,
-                                    expected_odometer=odo_expect)
+                                    expected_odometer=odo_expect,
+                                    require_complete=bool(strict))
         payload.update(summary)
         payload["decision"] = "pass" if summary["ok"] else "review"
     elif category == "repair":

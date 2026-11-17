@@ -1,0 +1,11 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage();
+p.on("pageerror", e => console.log("[pageerror]", String(e).slice(0,200)));
+p.on("console", m => { if (m.type()==="error") console.log("[console]", m.text().slice(0,200)); });
+p.on("response", r => { if (r.url().includes("/v1/meta")) console.log("[net] /v1/meta →", r.status()); });
+await p.goto("http://127.0.0.1:8017/ui/console.html", { waitUntil: "networkidle" });
+await p.waitForTimeout(4000);
+console.log("foot:", JSON.stringify(await p.textContent(".sidebar .foot")));
+console.log("meta 直连:", (await (await p.request.get("http://127.0.0.1:8017/v1/meta")).status()));
+await b.close();

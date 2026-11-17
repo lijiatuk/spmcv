@@ -1,0 +1,12 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+p.on("pageerror", (e) => console.log("[pageerror]", String(e).slice(0, 300)));
+p.on("console", (m) => { if (m.type() === "error") console.log("[console]", m.text().slice(0, 300)); });
+await p.goto("http://127.0.0.1:8017/ui/console.html#infer", { waitUntil: "networkidle" });
+await p.setInputFiles("#files", ["/tmp/frame_vin.png"]);
+await p.waitForTimeout(2000);
+console.log("wrap hidden:", await p.evaluate(() => document.getElementById("inferImgWrap")?.hidden));
+console.log("img src:", await p.evaluate(() => document.getElementById("inferImg")?.src?.slice(0, 60)));
+console.log("files:", await p.evaluate(() => document.getElementById("files")?.files?.length));
+await b.close();

@@ -186,11 +186,12 @@
   let ov = null;
   let evalMode = "new";
 
-  function kpi(icon, value, label, kind) {
+  function kpi(icon, value, label, kind, sub) {
     const c = el("div", "kpi" + (kind ? " " + kind : ""));
     c.append(el("div", "ico", icon));
     const box = el("div");
     box.append(el("div", "v", value), el("div", "k", label));
+    if (sub) box.append(el("div", "k-sub", sub));
     c.append(box);
     return c;
   }
@@ -329,10 +330,12 @@
     const oof = ov.eval.oof || {};
     const newDomain = oof.per_bucket?.new || ov.eval.new_domain || {};
     $("kpis").replaceChildren(
-      kpi("▤", String(ov.dataset.total), "数据集张数"),
-      kpi("◈", ov.model.version, "模型版本", "b"),
-      kpi("↗", oof.top1 != null ? `${(oof.top1 * 100).toFixed(1)}%` : "—", "折外总体准确率", "b"),
-      kpi("⌁", newDomain.top1 != null ? `${(newDomain.top1 * 100).toFixed(1)}%` : "—", "新域折外准确率", "c"),
+      kpi("▤", String(ov.dataset.total), "已标注照片", "", "12 类 · 新旧数据合计"),
+      kpi("◈", ov.model.version, "当前模型", "b", "在线服务中"),
+      kpi("↗", oof.top1 != null ? `${(oof.top1 * 100).toFixed(1)}%` : "—",
+        "识别准确率", "b", oof.n ? `留出 ${oof.n} 张未参与训练` : ""),
+      kpi("⌁", newDomain.top1 != null ? `${(newDomain.top1 * 100).toFixed(1)}%` : "—",
+        "新场景准确率", "c", newDomain.n ? `新数据 ${newDomain.n} 张` : ""),
     );
     $("modelVersion").textContent = `模型 ${ov.model.version} · ${ov.model.heads} 个头`;
     renderAccChart();
@@ -349,7 +352,7 @@
     card.style.marginTop = "14px";
     const head = el("div", "card-head");
     head.append(el("span", "t", "服务运行指标"),
-      el("span", "hint", "来自 /metrics · 进程启动以来累计"));
+      el("span", "hint", "服务启动以来"));
     card.append(head, el("div", "ops", ""));
     card.lastChild.id = "ops";
     $("view-overview").append(card);
@@ -373,13 +376,13 @@
       const errs = pick("spm_image_errors_total");
       const reviews = pick("spm_image_reviews_total");
       const cells = [
-        { k: "单图 P95 延迟", v: p95 == null ? "—" : `${Math.round(p95)} ms`,
-          s: p50 == null ? "" : `P50 ${Math.round(p50)} ms · 目标 ≤ 2000 ms`,
+        { k: "单张识别耗时（95%）", v: p95 == null ? "—" : `${Math.round(p95)} ms`,
+          s: p50 == null ? "" : `一半请求在 ${Math.round(p50)} ms 内`,
           warn: p95 != null && p95 > 2000 },
-        { k: "识图请求", v: req == null ? "—" : String(req), s: "累计（含失败）" },
-        { k: "复核率", v: req && reviews != null ? `${((reviews / req) * 100).toFixed(1)}%` : "—",
-          s: reviews == null ? "" : `复核 ${reviews} / 请求 ${req ?? 0}` },
-        { k: "错误数", v: errs == null ? "—" : String(errs), s: "5xx / 超时", warn: (errs || 0) > 0 },
+        { k: "累计识别", v: req == null ? "—" : String(req), s: "含失败" },
+        { k: "转人工比例", v: req && reviews != null ? `${((reviews / req) * 100).toFixed(1)}%` : "—",
+          s: reviews == null ? "" : `${reviews} / ${req ?? 0} 张` },
+        { k: "失败次数", v: errs == null ? "—" : String(errs), s: "服务错误 / 超时", warn: (errs || 0) > 0 },
       ];
       box.replaceChildren(...cells.map((c) => {
         const op = el("div", "op");
@@ -394,25 +397,22 @@
   }
 
   function renderAccChart() {
-    const domain = ov.eval.oof?.per_bucket?.[evalMode]
-      || (evalMode === "old" ? ov.eval.old_domain : ov.eval.new_domain);
-    const src = domain?.per_class || {};
+    const oof = ov.eval.oof || {};
+    const src = oof.per_class || {};
     const rows = Object.entries(src).map(([label, r]) => ({
       label: sname(label), acc: r.recall, support: r.support,
     }));
     if (!rows.length) {
-      $("accChart").replaceChildren(el("div", "meta",
-        evalMode === "old" ? "没有老域折外评测" : "没有严格折外评测结果"));
+      $("accChart").replaceChildren(el("div", "meta", "还没有可用的评测结果"));
       return;
     }
     const narrow = window.matchMedia("(max-width: 720px)").matches;
     const chart = narrow
       ? barList(rows, "label", "acc")
-      : barChart(rows, "label", "acc", { ref: domain?.top1 });
-    const title = document.querySelector("#view-overview .card .t");
-    if (title) {
-      title.textContent = `${evalMode === "new" ? "新域" : "旧域"}折外逐类召回率（按工单留出）`
-        + (domain?.top1 != null ? ` · 整体 ${(domain.top1 * 100).toFixed(1)}%` : "");
+      : barChart(rows, "label", "acc", { ref: oof.top1 });
+    if ($("accTitle")) {
+      $("accTitle").textContent = "各类照片识别准确率"
+        + (oof.top1 != null ? ` · 整体 ${(oof.top1 * 100).toFixed(1)}%` : "");
     }
     const legend = el("div", "chart-legend");
     const legendItems = [["lg-ok", "≥ 70%"], ["lg-low", "< 70% 需关注"]];
@@ -423,8 +423,7 @@
       legend.append(item);
     });
     const note = el("div", "chart-note",
-      `口径：每折只用工单外的图片预测，n=${domain?.n ?? "—"}；` +
-      "反映目录标签一致性，不等于人工黄金集或整单通过率。悬停可看各类支持数（n）。");
+      `共 ${oof.n ?? "—"} 张未参与训练的照片；橙色表示低于 70%，建议补拍或补标。`);
     $("accChart").replaceChildren(chart, legend, note);
   }
 
@@ -436,35 +435,28 @@
     if (ov && !$("view-overview").hidden) renderAccChart();
   });
 
-  (function bindEvalToggle() {
-    const seg = document.querySelector(".seg[data-eval]");
-    if (!seg) return;
-    seg.addEventListener("click", (e) => {
-      const b = e.target.closest("button");
-      if (!b) return;
-      [...seg.children].forEach((x) => x.classList.toggle("on", x === b));
-      evalMode = b.dataset.eval;
-      renderAccChart();
-    });
-  })();
-
   function renderModels(perf) {
     const list = $("modelList");
     list.replaceChildren();
-    const names = { scene: "场景分类", group: "油液分组", action: "动作 6 类",
-                    bin_axle: "桥 加/放", bin_tire: "轮胎 加/放", bin_filter: "滤芯 有/无", det: "检测器" };
-    (ov.model.roles || []).forEach((r) => {
+    const names = { scene: "场景识别", det: "检测器（画框）" };
+    const roles = ov.model.roles || [];
+    // 默认只显示真正参与判定的两个模型；分组/动作等辅助头没启用时不再占一屏，
+    // 也不再用“未用于判定”这种内部术语。
+    const shown = ov.model.fusion_enabled
+      ? roles
+      : roles.filter((r) => r === "scene" || r === "det");
+    shown.forEach((r) => {
       const row = el("div", "mrow");
       const box = el("div", "name");
-      box.append(el("div", null, names[r] || r), el("div", "sub", r));
-      const isAux = ["group", "action", "bin_axle", "bin_tire", "bin_filter"].includes(r);
-      const active = !isAux || ov.model.fusion_enabled;
-      row.append(box, el("span", "pill " + (active ? "ok" : "warn"), active ? "启用" : "未用于判定"));
+      box.append(el("div", null, names[r] || r));
+      row.append(box, el("span", "pill ok", "启用"));
       list.append(row);
     });
-    $("modelsOnline").textContent = ov.model.fusion_enabled
-      ? "辅助融合开启 · 需评估"
-      : "场景头判定 · 辅助头停用";
+    if (!ov.model.fusion_enabled) {
+      list.append(el("div", "meta",
+        "当前只用场景识别模型给出结论；分组、动作等辅助模型未启用，不影响结果。"));
+    }
+    $("modelsOnline").textContent = ov.model.fusion_enabled ? "辅助模型已启用" : "运行正常";
   }
 
   /* ---------- 识别 ---------- */
@@ -658,12 +650,17 @@
     const outsideN = (d.unexpected || []).length;
     const reasons = d.reasons || [];
 
-    const verdict = el("div", "verdict " + (d.ok ? "ok" : "warn"));
-    verdict.append(el("span", "v-ico", d.ok ? "✓" : "!"));
+    // 只交了车头照时，整单四件套本来就不齐；这时说“可自动通过”会误导，
+    // 说“需人工复核”又等于把好图判坏。用第三种状态把边界讲清楚。
+    const partial = d.ok === true && d.complete === false;
+    const verdict = el("div", "verdict " + (d.ok ? (partial ? "partial" : "ok") : "warn"));
+    verdict.append(el("span", "v-ico", d.ok ? (partial ? "◐" : "✓") : "!"));
     const vMain = el("div");
-    vMain.append(el("div", "v-t", d.ok ? "可自动通过" : "需人工复核"),
+    vMain.append(el("div", "v-t", d.ok ? (partial ? "本张通过（整单未校验）" : "可自动通过") : "需人工复核"),
       el("div", "v-s", d.ok
-        ? `${CATS[cat].name} ${insideN} 张，未命中拦截规则`
+        ? (partial
+          ? `${CATS[cat].name} ${insideN} 张已识别；整单还缺其他照片，未做一致性校验`
+          : `${CATS[cat].name} ${insideN} 张，未命中拦截规则`)
         : (reasons[0] || "存在需要人工确认的项")));
     verdict.append(vMain);
     if (d.degraded) verdict.append(el("span", "tag warn", "部分照片超时"));
@@ -721,6 +718,12 @@
         stat("首页 VIN", d.service_front_vin || d.service_front_vin_partial, { small: true }));
     }
     wrap.append(s);
+
+    if (partial && d.missing_reasons?.length) {
+      wrap.append(el("div", "chart-note",
+        "整单还缺：" + d.missing_reasons.join("、") +
+        "。补齐后调用整单校验（/v1/workorder）才能判断能否自动通过。"));
+    }
 
     if (reasons.length) {
       const ul = el("ul", "tips");
@@ -968,13 +971,49 @@
     });
   }
 
-  /* ---------- 数据集：上传 + 自动标注 ---------- */
+  /* ---------- 数据集：上传 + 自动标注 + 逐张人工确认 ---------- */
+  let dsCurrent = null;
+  let dsDetail = null;
+  const dsChanges = new Map();
+
+  function dsUpdateBar() {
+    const bar = $("dsDetailBar");
+    if (!bar) return;
+    bar.hidden = dsChanges.size === 0;
+    $("dsDetailChanged").textContent = `已修改 ${dsChanges.size} 张`;
+  }
+
+  function renderOrphanBanner(d) {
+    const box = $("dsBanner");
+    box.replaceChildren();
+    const n = d.orphan_images || 0;
+    if (!n) return;
+    const names = (d.orphans || []).map((o) => `${o.batch}（${o.count} 张）`).join("、");
+    const banner = el("div", "banner-warn");
+    banner.append(el("span", null,
+      `有 ${n} 条历史自动标注记录对应的图片已不存在：${names}。` +
+      "这不是挂载问题，是批次目录被删过；清理后不会再出现在待复核队列。"));
+    const btn = el("button", "ghost", "清理失效记录");
+    btn.style.marginLeft = "10px";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        const r = await api("/viz/api/dataset/cleanup", { method: "POST" });
+        toast(`已清理 ${r.removed} 条失效记录`);
+        loadDataset();
+      } catch (err) { toast("清理失败：" + err.message, "bad"); btn.disabled = false; }
+    });
+    banner.append(btn);
+    box.append(banner);
+  }
+
   async function loadDataset() {
     const box = $("dsBatches");
     const cnt = $("dsCount");
     try {
       const d = await api("/viz/api/dataset/batches");
       const list = d.batches || [];
+      renderOrphanBanner(d);
       cnt.textContent = `共 ${list.length} 批`;
       box.replaceChildren();
       if (!list.length) {
@@ -985,11 +1024,18 @@
       list.forEach((b) => {
         const card = el("div", "ds-batch");
         const top = el("div", "top");
-        top.append(el("span", "name", b.batch),
+        const name = el("span", "name", b.batch);
+        name.style.cursor = "pointer";
+        name.addEventListener("click", () => openDatasetBatch(b.batch));
+        top.append(name,
                    el("span", "when", (b.created_at || "").replace("T", " ").slice(0, 16)),
                    el("span", "when", `${b.images} 张`));
         const acts = el("div", "acts");
         const stat = el("span", "batch-stat", "");
+
+        const view = el("button", "ghost", "查看 / 改标");
+        view.addEventListener("click", () => openDatasetBatch(b.batch));
+
         const btn = el("button", "ghost", "自动标注");
         btn.addEventListener("click", async () => {
           btn.disabled = true; btn.textContent = "标注中…";
@@ -1004,7 +1050,19 @@
             btn.textContent = "自动标注";
           } finally { btn.disabled = false; }
         });
-        acts.append(stat, btn);
+
+        const del = el("button", "ghost", "删除");
+        del.addEventListener("click", async () => {
+          if (!confirm(`删除批次 ${b.batch}？\n\n会同时删除这批图片、自动标注和人工结论，不可恢复。`)) return;
+          del.disabled = true;
+          try {
+            await api(`/viz/api/dataset/${encodeURIComponent(b.batch)}`, { method: "DELETE" });
+            if (dsCurrent === b.batch) closeDatasetDetail();
+            toast(`已删除 ${b.batch}`);
+            loadDataset();
+          } catch (err) { toast("删除失败：" + err.message, "bad"); del.disabled = false; }
+        });
+        acts.append(stat, view, btn, del);
         top.append(acts);
 
         const dist = el("div", "dist");
@@ -1022,6 +1080,101 @@
       box.replaceChildren(el("div", "meta", "加载失败：" + err.message));
     }
   }
+
+  function closeDatasetDetail() {
+    dsCurrent = null;
+    dsDetail = null;
+    dsChanges.clear();
+    $("dsDetailCard").hidden = true;
+    $("dsDetailBody").replaceChildren();
+    dsUpdateBar();
+  }
+
+  function renderDatasetDetail(d) {
+    const body = $("dsDetailBody");
+    body.replaceChildren();
+    const grid = el("div", "lgrid");
+    (d.items || []).forEach((it) => {
+      const card = el("div", "lcard");
+      const shot = el("div", "lshot");
+      const img = el("img");
+      img.loading = "lazy";
+      img.src = it.url;
+      img.alt = it.name;
+      shot.append(img);
+      const info = el("div", "lbody");
+      info.append(el("div", "lname", it.name));
+
+      const row0 = el("div", "lrow");
+      row0.append(el("span", "lpred", `目录：${sname(it.dir_label)}`));
+      if (it.auto_label) {
+        const conf = it.confidence != null ? ` ${(it.confidence * 100).toFixed(0)}%` : "";
+        row0.append(el("span", "lpred" + (it.auto_label !== it.dir_label ? " bad" : ""),
+          `预标：${sname(it.auto_label)}${conf}`));
+      } else {
+        row0.append(el("span", "lpred", "未自动标注"));
+      }
+      info.append(row0);
+
+      const row = el("div", "lrow");
+      const sel = el("select");
+      const opts = [...(d.classes || []), { slug: "uncertain", name: "无法判断（不用于训练）" },
+        { slug: "exclude", name: "不算这一类（不用于训练）" }];
+      opts.forEach((c) => sel.append(new Option(c.name, c.slug)));
+      sel.value = it.final_label || it.dir_label;
+      sel.addEventListener("change", () => {
+        const base = it.final_label || it.dir_label;
+        if (sel.value === base) dsChanges.delete(it.path);
+        else dsChanges.set(it.path, { path: it.path, label: sel.value });
+        dsUpdateBar();
+      });
+      row.append(sel);
+      if (it.reviewed) row.append(el("span", "lpred", it.corrected ? "已改标" : "已确认"));
+      info.append(row);
+      card.append(shot, info);
+      grid.append(card);
+    });
+    body.append(grid);
+    $("dsDetailStats").textContent =
+      `${d.stats.images} 张 · 已自动标注 ${d.stats.auto_labeled} · 已人工确认 ${d.stats.reviewed} · 改标 ${d.stats.corrected}`;
+  }
+
+  async function openDatasetBatch(batch) {
+    try {
+      const d = await api(`/viz/api/dataset/${encodeURIComponent(batch)}?limit=500`);
+      dsCurrent = batch;
+      dsDetail = d;
+      dsChanges.clear();
+      $("dsDetailCard").hidden = false;
+      $("dsDetailTitle").textContent = `批次 ${batch}`;
+      renderDatasetDetail(d);
+      dsUpdateBar();
+      $("dsDetailCard").scrollIntoView({ block: "start", behavior: "smooth" });
+    } catch (err) { toast("打开批次失败：" + err.message, "bad"); }
+  }
+
+  $("dsDetailClose").addEventListener("click", closeDatasetDetail);
+  $("dsDetailReset").addEventListener("click", () => {
+    dsChanges.clear();
+    dsUpdateBar();
+    if (dsCurrent) openDatasetBatch(dsCurrent);
+  });
+  $("dsDetailSave").addEventListener("click", async () => {
+    if (!dsCurrent || !dsChanges.size) return;
+    const btn = $("dsDetailSave");
+    btn.disabled = true;
+    try {
+      const r = await api(`/viz/api/dataset/${encodeURIComponent(dsCurrent)}/labels`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [...dsChanges.values()] }),
+      });
+      toast(`已保存 ${r.saved} 张`);
+      dsChanges.clear();
+      await loadDataset();
+      if (dsCurrent) await openDatasetBatch(dsCurrent);
+    } catch (err) { toast("保存失败：" + err.message, "bad"); }
+    finally { btn.disabled = false; }
+  });
 
   async function uploadDataset(file) {
     const out = $("dsResult");
@@ -1589,30 +1742,75 @@
   /* ---------- 训练 ---------- */
   let trainTimer = null;
 
-  async function initTrainPanel() {
+  async function loadTrainingDatasets() {
     const sel = $("trData");
-    if (sel.options.length) return;
-    sel.append(new Option("合并数据集 fold0（推荐）", "union:0"));
+    const keep = sel.value;
+    sel.replaceChildren();
+    sel.append(new Option("全部历史数据（自动 70/15/15）", "all"));
+    try {
+      const d = await api("/viz/api/dataset/training");
+      (d.datasets || []).forEach((ds) => {
+        const c = ds.counts || {};
+        sel.append(new Option(
+          `${ds.name} · 训练 ${c.train ?? 0} / 验证 ${c.val ?? 0} / 测试 ${c.test ?? 0}`,
+          `built:${ds.name}`));
+      });
+    } catch {}
     try {
       const d = await api("/viz/api/dataset/batches");
       (d.batches || []).forEach((b) => {
-        sel.append(new Option(`上传批次 ${b.batch}（${b.images} 张）`, `upload:${b.batch}`));
+        sel.append(new Option(`上传批次 ${b.batch}（${b.images} 张，自动 70/15/15）`,
+          `upload:${b.batch}`));
       });
     } catch {}
+    if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+    showTrainDataInfo();
+  }
+
+  function showTrainDataInfo() {
+    const value = $("trData").value;
+    if (value === "all") {
+      $("trDataInfo").textContent = "开始训练时会自动合并新旧数据并按工单分组切分。";
+      return;
+    }
+    $("trDataInfo").textContent = value.startsWith("upload:")
+      ? "开始训练时会把这一批按 70/15/15 切分，人工改过的标签优先。"
+      : "";
+  }
+
+  async function initTrainPanel() {
+    await loadTrainingDatasets();
   }
 
   function renderTrain(j) {
     const box = $("trStatus");
-    if (!j) { box.replaceChildren(el("div", "meta", "还没有训练任务")); return; }
+    if (!j) { box.replaceChildren(el("div", "meta", "当前没有训练任务")); return; }
+    const label = { preparing: "准备中", running: "训练中", completed: "已完成",
+                    failed: "失败", cancelled: "已取消" }[j.status] || j.status;
     const pct = j.epochs ? Math.min(100, Math.round((j.epoch / j.epochs) * 100)) : 0;
     const tone = j.status === "completed" ? "ok" : j.status === "failed" ? "warn" : "";
     const head = el("div", null,
-      `状态：${j.status}　epoch ${j.epoch}/${j.epochs}` +
-      (j.top1 != null ? `　top1 ${(j.top1 * 100).toFixed(1)}%` : ""));
+      `状态：${label}　第 ${j.epoch}/${j.epochs} 轮` +
+      (j.top1 != null ? `　验证集准确率 ${(j.top1 * 100).toFixed(1)}%` : ""));
     head.className = "meta " + tone;
     const bar = el("div", "trainbar");
     const fill = el("i"); fill.style.width = pct + "%"; bar.append(fill);
     box.replaceChildren(head, bar);
+    const meta = [];
+    if (j.dataset_name) {
+      const c = j.dataset_counts || {};
+      meta.push(`数据：${j.dataset_name}` +
+        (c.train != null ? `（训练 ${c.train} / 验证 ${c.val} / 测试 ${c.test}）` : ""));
+    }
+    if (j.device) meta.push(`设备：${j.device}`);
+    if (meta.length) box.append(el("div", "meta", meta.join(" · ")));
+    if (j.test?.available) {
+      box.append(el("div", "meta ok",
+        `测试集：${(j.test.top1 * 100).toFixed(1)}%（${j.test.n} 张，未参与训练/调参）`));
+    } else if (j.status === "completed") {
+      box.append(el("div", "banner-warn",
+        "这次训练没有测试集结果，不能作为上线依据。请用“全部历史数据”重新训练。"));
+    }
     if (j.error) box.append(el("div", "banner-warn", j.error));
   }
 
@@ -1631,35 +1829,89 @@
       if (running) {
         trainTimer = setTimeout(pollTrain, 2500);
       } else if (d.job.status === "completed" && d.job.weights) {
+        const acts = el("div");
+        acts.style.marginTop = "8px";
         const btn = el("button", "btn", "注册为候选版本");
-        btn.style.marginTop = "8px";
         btn.addEventListener("click", async () => {
+          if (!d.job.test?.available) {
+            if (!confirm("这次训练没有测试集结果。仍要注册为候选版本吗？（不建议上线）")) return;
+          }
           const ver = prompt("版本号（vX.Y.Z）", "v5.2.0");
           if (!ver) return;
+          const metrics = { scene: {
+            top1: d.job.test?.top1 ?? d.job.top1,
+            val_n: d.job.test?.n,
+            note: d.job.test?.available
+              ? `独立测试集 ${d.job.test.n} 张（未参与训练/调参）`
+              : "无独立测试集，仅验证集",
+          } };
           try {
             await api("/viz/api/model/register", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ version: ver, weights: d.job.weights,
-                                     metrics: { scene: { top1: d.job.top1 } } }),
+              body: JSON.stringify({ version: ver, weights: d.job.weights, metrics }),
             });
-            $("modelHint").textContent = `已注册 ${ver}（候选，可切换）`;
+            $("modelHint").textContent = `已注册 ${ver}（候选，可在下方切换）`;
             loadModelVersions();
           } catch (err) { toast("注册失败：" + err.message, "bad"); }
         });
-        $("trStatus").append(btn);
+        const clear = el("button", "ghost", "清除这次记录");
+        clear.style.marginLeft = "8px";
+        clear.addEventListener("click", async () => {
+          if (!confirm("清除训练记录和本次 run 目录？权重文件会被删除。")) return;
+          try {
+            await api("/viz/api/train/delete", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ job_id: d.job.job_id, delete_run: true }),
+            });
+            pollTrain();
+          } catch (err) { toast("清除失败：" + err.message, "bad"); }
+        });
+        acts.append(btn, clear);
+        $("trStatus").append(acts);
       }
     } catch (err) {
       renderTrain(null);
     }
   }
 
+  $("trData").addEventListener("change", showTrainDataInfo);
+
+  $("trCleanTests").addEventListener("click", async () => {
+    const btn = $("trCleanTests");
+    btn.disabled = true;
+    try {
+      const r = await api("/viz/api/train/cleanup_tests", { method: "POST" });
+      toast(r.removed?.length ? `已清理 ${r.removed.length} 条测试记录` : "没有需要清理的测试记录");
+      pollTrain();
+    } catch (err) { toast("清理失败：" + err.message, "bad"); }
+    finally { btn.disabled = false; }
+  });
+
+  $("trBuild").addEventListener("click", async () => {
+    const btn = $("trBuild");
+    btn.disabled = true; btn.textContent = "准备中…";
+    try {
+      const r = await api("/viz/api/dataset/build", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "all", include_uploads: true }),
+      });
+      $("trDataInfo").textContent =
+        `已准备 ${r.name}：训练 ${r.counts.train} / 验证 ${r.counts.val} / 测试 ${r.counts.test}` +
+        (r.warnings?.length ? `（${r.warnings.join("；")}）` : "");
+      await loadTrainingDatasets();
+      $("trData").value = `built:${r.name}`;
+    } catch (err) {
+      toast("准备失败：" + err.message, "bad");
+    } finally { btn.disabled = false; btn.textContent = "准备训练集"; }
+  });
+
   $("trStart").addEventListener("click", async () => {
-    const [kind, arg] = $("trData").value.split(":");
+    const dataset = $("trData").value || "all";
     const body = {
-      dataset: kind === "union" ? "union" : `upload:${arg}`,
-      fold: kind === "union" ? Number(arg || 0) : 0,
+      dataset,
       epochs: Number($("trEpochs").value || 25),
       imgsz: Number($("trImgsz").value || 512),
+      include_uploads: true,
     };
     $("trStart").disabled = true;
     try {
@@ -1697,9 +1949,13 @@
       box.replaceChildren(el("div", "meta", "加载失败：" + err.message));
       return;
     }
+    if (d.models_writable === false) {
+      box.append(el("div", "banner-warn",
+        "模型目录是只读挂载：可以查看，但不能切换或删除。请把 api 容器的 models 挂载改成可写后重建。"));
+    }
     const t = el("table", "tbl");
     const hr = el("tr");
-    ["版本", "状态", "场景 top1", "评测口径", "创建时间", ""].forEach((x) =>
+    ["版本", "状态", "准确率", "评测数据", "创建时间", ""].forEach((x) =>
       hr.append(el("th", null, x)));
     const thead = el("thead"); thead.append(hr); t.append(thead);
     const tb = el("tbody");
@@ -1707,23 +1963,26 @@
       const tr = el("tr");
       const name = el("td", null, v.version);
       const st = el("td");
-      st.append(el("span", "pill " + (v.active ? "ok" : ""), v.active ? "使用中" : (v.status || "—")));
+      const stLabel = v.active ? "使用中" : (v.status === "retired" ? "历史版本"
+        : v.status === "candidate" ? "候选" : (v.status || "—"));
+      st.append(el("span", "pill " + (v.active ? "ok" : ""), stLabel));
       const top1 = v.metrics?.scene?.top1;
       const m = el("td", "num", top1 != null ? `${(top1 * 100).toFixed(2)}%` : "—");
       const sc = v.metrics?.scene || {};
-      const scope = sc.note || (sc.val_n ? `单折 ${sc.val_n} 张` : "—");
       const scopeTd = el("td", "num");
-      // “单折 107 张”这种口径不能和 5 折 OOF 比大小，标注出来避免误读
-      if (/单折/.test(scope)) {
-        scopeTd.append(el("span", "tag warn", "不可比"), document.createTextNode(" " + scope));
+      if (sc.val_n) {
+        const isTest = /测试集/.test(sc.note || "");
+        const isOld = /单折|折外/.test(sc.note || "");
+        scopeTd.append(document.createTextNode(
+          `${isTest ? "独立测试集" : isOld ? "旧评测集" : "验证集"} ${sc.val_n} 张`));
+        if (isOld) scopeTd.title = "这个版本用的是旧评测集，和当前版本不能直接比大小";
       } else {
-        scopeTd.textContent = scope;
+        scopeTd.textContent = "—";
       }
-      scopeTd.title = "不同版本的评测集不同，数字不可直接横向比较";
       const when = el("td", "num", (v.created_at || "").replace("T", " ").slice(0, 16));
       const act = el("td");
-      if (!v.active && v.exists) {
-        const btn = el("button", "ghost", "切换");
+      if (!v.active && v.exists && d.models_writable !== false) {
+        const btn = el("button", "ghost", "设为线上");
         btn.addEventListener("click", async () => {
           if (!confirm(`把线上模型切到 ${v.version}？\n\n切换会立即热加载，无需重启。`)) return;
           btn.disabled = true;
@@ -1731,7 +1990,7 @@
             const r2 = await api("/viz/api/model/activate", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ version: v.version }),
-            }).catch(() => null);
+            });
             $("modelHint").textContent = r2?.reloaded
               ? `已切到 ${v.version}，已生效`
               : `已切到 ${v.version}，需重启 vision 服务`;
@@ -1755,7 +2014,18 @@
             });
             $("modelHint").textContent = `已删除 ${v.version}`;
             loadModelVersions();
-          } catch (err) { toast("删除失败：" + err.message, "bad"); }
+          } catch (err) {
+            const retry = confirm(`删除失败：${err.message}\n\n只从列表移除、保留权重文件？`);
+            if (!retry) return;
+            try {
+              await api("/viz/api/model/delete", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ version: v.version, delete_files: false }),
+              });
+              $("modelHint").textContent = `已从列表移除 ${v.version}（权重文件保留）`;
+              loadModelVersions();
+            } catch (err2) { toast("移除失败：" + err2.message, "bad"); }
+          }
         });
         act.append(del);
       }

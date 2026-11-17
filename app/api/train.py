@@ -4,14 +4,13 @@
   - **同一时间只允许一个训练任务**：训练会吃满 CPU/GPU，并发只会互相拖死。
   - 任务状态落 JSON 文件（`var/train_jobs/`），进程重启后仍能看到结果。
   - 训练完成后**不自动上线**，只登记为 candidate，由人确认后切版本。
-  - 数据来源两种：`union`（已整理的合并数据集）或 `upload:<batch>`（页面上传的批次）。
+  - 数据来源：`all`（新旧合并，自动 70/15/15）、`built:<名称>`（已生成的数据集）
+    或 `upload:<batch>`（某个上传批次，按同样规则切分）。
 """
 from __future__ import annotations
 
 import json
 import os
-import random
-import shutil
 import subprocess
 import sys
 import time
@@ -20,8 +19,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
+from app.api.viz import _load_json
 from app.config import BASE_DIR
-from app.api.viz import UPLOAD_ROOT, IMG_EXT, CLASS_MAP, _load_json
+from app.services import datasets as dataset_service
 
 router = APIRouter(tags=["train"])
 
@@ -30,12 +30,29 @@ JOBS = ROOT / "var" / "train_jobs"
 RUNS = ROOT / "var" / "runs"
 PRETRAINED = ROOT / "models" / "pretrained" / "yolo26n-cls.pt"
 UNION_CLS = ROOT / "data" / "processed" / "union" / "cls"
-
-SLUG_TO_DIR = {meta["slug"]: name for name, meta in CLASS_MAP.items()}
-
+DATASETS = ROOT / "data" / "processed" / "datasets"
 
 def _job_path(job_id: str) -> Path:
     return JOBS / f"{job_id}.json"
+
+
+def _is_test_job(job: dict) -> bool:
+    """1–2 轮基本是冒烟测试，不该出现在生产“当前训练”里。"""
+    try:
+        return int(job.get("epochs") or 0) <= 2
+    except (TypeError, ValueError):
+        return False
+
+
+def _ratios(payload: dict) -> dict | None:
+    ratios = {}
+    for key in ("train", "val", "test"):
+        if payload.get(key) is not None:
+            try:
+                ratios[key] = float(payload[key])
+            except (TypeError, ValueError):
+                raise HTTPException(422, f"{key} 必须是数字")
+    return ratios or None
 
 
 def _active_job() -> dict | None:
@@ -71,62 +88,54 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def _prepare_upload_dataset(batch: str) -> Path:
-    """把上传批次按 8:2 切成 train/val，供分类训练使用。"""
-    src = UPLOAD_ROOT / batch
-    if not src.is_dir():
-        raise HTTPException(404, f"上传批次不存在: {batch}")
-    dest = ROOT / "data" / "processed" / "uploads" / batch
-    if dest.exists():
-        shutil.rmtree(dest)
-    rng = random.Random(42)
-    total = 0
-    for slug_dir in sorted(p for p in src.iterdir() if p.is_dir()):
-        slug = slug_dir.name
-        if slug not in SLUG_TO_DIR:
-            continue
-        files = [f for f in slug_dir.iterdir() if f.suffix.lower() in IMG_EXT]
-        if len(files) < 2:
-            continue
-        rng.shuffle(files)
-        cut = max(1, int(len(files) * 0.8))
-        for part, chunk in (("train", files[:cut]), ("val", files[cut:] or files[-1:])):
-            d = dest / part / slug
-            d.mkdir(parents=True, exist_ok=True)
-            for f in chunk:
-                target = d / f.name
-                if not target.exists():
-                    target.symlink_to(f)
-                total += 1
-    if total == 0:
-        raise HTTPException(400, "这批数据没有可训练的类别目录")
-    return dest
-
-
 @router.post("/viz/api/train/start")
 def train_start(payload: dict):
     """发起训练。同一时间只允许一个任务。"""
     if _active_job():
         raise HTTPException(409, "已有训练任务在跑，等它结束或先取消")
 
-    dataset = str(payload.get("dataset") or "union")
+    dataset = str(payload.get("dataset") or "all")
     epochs = int(payload.get("epochs") or 25)
     if not 1 <= epochs <= 200:
         raise HTTPException(422, "epochs 需在 1–200")
     imgsz = int(payload.get("imgsz") or 512)
     fold = int(payload.get("fold") or 0)
+    device = str(payload.get("device") or os.environ.get("TRAIN_DEVICE") or "auto")
 
-    if dataset == "union":
-        data_dir = UNION_CLS / f"fold{fold}"
-        if not data_dir.is_dir():
-            raise HTTPException(
-                404, f"找不到 {data_dir}，先在服务器上跑 scripts/build_union.py --fold {fold}")
-    elif dataset.startswith("upload:"):
-        data_dir = _prepare_upload_dataset(dataset.split(":", 1)[1])
-    else:
-        raise HTTPException(422, "dataset 只能是 union 或 upload:<批次>")
+    # 数据集统一走 datasets.build_dataset：按工单分组、70/15/15、相对软链，
+    # 人工改过的标签会覆盖目录标签。页面不需要先登服务器跑脚本。
+    dataset_meta: dict = {}
+    try:
+        if dataset.startswith("built:"):
+            name = dataset.split(":", 1)[1]
+            data_dir = DATASETS / name
+            dataset_meta = _load_json(data_dir / "manifest.json")
+        elif dataset.startswith("upload:"):
+            dataset_meta = dataset_service.build_dataset(
+                source=dataset, include_uploads=False,
+                ratios=_ratios(payload))
+            data_dir = Path(dataset_meta["path"])
+        elif dataset == "union" and (UNION_CLS / f"fold{fold}").is_dir():
+            # 兼容旧部署：已经生成过的 5 折目录继续可用
+            data_dir = UNION_CLS / f"fold{fold}"
+            dataset_meta = {"name": f"union_fold{fold}", "counts": {}}
+        elif dataset in ("all", "union", "auto"):
+            dataset_meta = dataset_service.build_dataset(
+                source="all", include_uploads=bool(payload.get("include_uploads", True)),
+                ratios=_ratios(payload))
+            data_dir = Path(dataset_meta["path"])
+        else:
+            raise HTTPException(422, "dataset 只能是 all / built:<名称> / upload:<批次>")
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-    # 训练要 ultralytics + torch。API 镜像默认不带（镜像小一半），
+    for part in ("train", "val"):
+        if not (data_dir / part).is_dir():
+            raise HTTPException(500, f"数据集缺少 {part} 目录: {data_dir}")
+
+    # 训练要 ultralytics + torch。API 镜像用 WITH_TRAIN 控制是否安装；
     # 没装就明确告知，而不是等子进程报 ModuleNotFoundError。
     try:
         import ultralytics  # noqa: F401
@@ -149,8 +158,12 @@ def train_start(payload: dict):
         "status": "preparing",
         "dataset": dataset,
         "data_dir": str(data_dir),
+        "dataset_name": dataset_meta.get("name") or data_dir.name,
+        "dataset_counts": dataset_meta.get("counts") or {},
+        "dataset_hash": dataset_meta.get("content_hash") or "",
         "epochs": epochs,
         "imgsz": imgsz,
+        "device": device,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "log": str(log_path),
         "run_name": name,
@@ -162,6 +175,7 @@ def train_start(payload: dict):
            "--epochs", str(epochs),
            "--imgsz", str(imgsz),
            "--batch", str(int(payload.get("batch") or 8)),
+           "--device", device,
            "--name", name,
            "--project", str(RUNS)]
     env = dict(os.environ, PYTHONUNBUFFERED="1")
@@ -188,6 +202,8 @@ def train_status(job_id: str = ""):
             job = active
         else:
             files = sorted(JOBS.glob("*.json"), reverse=True) if JOBS.is_dir() else []
+            # 生产页面不展示 1–2 轮的测试跑（历史上留过 epoch 1/1、top1 100% 的记录）。
+            files = [p for p in files if not _is_test_job(_load_json(p))]
             if not files:
                 return {"job": None}
             job = _load_json(files[0]) or {}
@@ -237,8 +253,57 @@ def train_status(job_id: str = ""):
         _job_path(job_id).write_text(json.dumps(job, ensure_ascii=False, indent=2),
                                      encoding="utf-8")
 
-    return {"job": {**job, "epoch": epoch, "top1": top1}, "running": running,
-            "log_tail": tail}
+    test = {}
+    test_path = RUNS / str(job.get("run_name")) / "test.json"
+    if test_path.is_file():
+        test = _load_json(test_path)
+        job["test"] = test
+    return {"job": {**job, "epoch": epoch, "top1": top1, "test": test},
+            "running": running, "log_tail": tail}
+
+
+@router.post("/viz/api/train/cleanup_tests")
+def train_cleanup_tests():
+    """清理所有 1–2 轮的测试训练记录和 run 目录。"""
+    import shutil
+
+    removed = []
+    if JOBS.is_dir():
+        for p in sorted(JOBS.glob("*.json")):
+            job = _load_json(p)
+            if not job or not _is_test_job(job):
+                continue
+            pid = job.get("pid")
+            if pid and _alive(pid):
+                continue
+            p.unlink(missing_ok=True)
+            run = RUNS / str(job.get("run_name") or job.get("job_id") or "")
+            if run.is_dir():
+                shutil.rmtree(run, ignore_errors=True)
+            removed.append(job.get("job_id") or p.stem)
+    return {"removed": removed}
+
+
+@router.post("/viz/api/train/delete")
+def train_delete(payload: dict):
+    """清除一条训练记录（测试跑出来的 epoch 1/100% 不该一直留在生产页面）。"""
+    import shutil
+
+    job_id = str(payload.get("job_id") or "").strip()
+    if not job_id or "/" in job_id or job_id.startswith("."):
+        raise HTTPException(400, "job_id 非法")
+    job = _load_json(_job_path(job_id))
+    if not job:
+        raise HTTPException(404, "任务不存在")
+    pid = job.get("pid")
+    if pid and _alive(pid):
+        raise HTTPException(409, "任务还在运行，请先取消")
+    _job_path(job_id).unlink(missing_ok=True)
+    if payload.get("delete_run", True):
+        run = RUNS / str(job.get("run_name") or job_id)
+        if run.is_dir():
+            shutil.rmtree(run, ignore_errors=True)
+    return {"deleted": job_id}
 
 
 @router.post("/viz/api/train/cancel")

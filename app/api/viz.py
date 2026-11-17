@@ -8,6 +8,7 @@ import asyncio
 import csv
 import io
 import json
+import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -17,7 +18,9 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from app.config import BASE_DIR, settings
+from app.services import datasets as dataset_service
 from app.services.feedback_store import feedback_store
+from app.services.paths import portable_path
 from app.services.vision_client import VisionClient
 
 router = APIRouter(tags=["viz"])
@@ -50,35 +53,8 @@ def get_labeling_guide():
 
 
 def _portable(path_str: str | Path) -> Path:
-    """把旧机器 / 旧容器写死的绝对路径重新挂到当前 ROOT 上。
-
-    评测报告、改标计划、反馈库里存的是导出机器上的绝对路径：
-    开发机是 `/Users/<user>/data/spmcv/data/...`，容器里是 `/app/data/...`。
-    打包换机后这些前缀失效，但文件其实就在当前 ROOT 下。
-    这里从路径尾部由长到短找一个真实存在的候选：`.../data/raw/recut/x.jpg`
-    → `<ROOT>/data/raw/recut/x.jpg`。找不到时原样返回，交给调用方判断。
-    """
-    p = Path(path_str)
-    if not p.is_absolute():
-        p = ROOT / p
-    try:
-        if p.exists():
-            return p
-    except OSError:
-        return p
-    # 只接受从 `data/` 这一段开始的后缀：既避免把 /x/y/同名文件 误挂到 ROOT，
-    # 也覆盖了 `/Users/u/proj/data/...` 里出现两次 data 的情况（取能命中的那个）。
-    parts = p.parts[1:]                      # 去掉文件系统根
-    for i, part in enumerate(parts):
-        if part != "data":
-            continue
-        candidate = ROOT.joinpath(*parts[i:])
-        try:
-            if candidate.exists():
-                return candidate
-        except OSError:
-            continue
-    return p
+    """把旧机器 / 旧容器写死的绝对路径重新挂到当前 ROOT 上。"""
+    return portable_path(path_str, ROOT)
 
 
 def _safe(path_str: str) -> Path:
@@ -649,13 +625,34 @@ def _manifest_ok(version_dir: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _active_version() -> str | None:
+    """当前线上版本：优先看 current 软链，其次看 manifest。
+
+    容器里如果 models/current 被复制成普通目录（不是软链），只看 is_symlink()
+    会得到 None，删除校验就会误以为没有在用版本。
+    """
+    cur = ROOT / "models/current"
+    if cur.is_symlink():
+        return cur.resolve().name
+    manifest = _load_json(cur / "manifest.json")
+    return manifest.get("model_version") or None
+
+
+def _models_writable() -> bool:
+    """模型目录是否可写（只读挂载时删除/切换都会失败）。"""
+    probe = ROOT / "models" / f".write_probe_{os.getpid()}"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 @router.get("/viz/api/model/versions")
 def model_versions():
     reg = _load_json(ROOT / "models/registry.json")
-    active = None
-    cur = ROOT / "models/current"
-    if cur.is_symlink():
-        active = cur.resolve().name
+    active = _active_version()
     out = []
     for name, meta in (reg.get("versions") or {}).items():
         d = ROOT / "models" / name
@@ -669,7 +666,7 @@ def model_versions():
             "active": name == active,
         })
     out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    return {"active": active, "versions": out}
+    return {"active": active, "versions": out, "models_writable": _models_writable()}
 
 
 @router.post("/viz/api/model/activate")
@@ -691,11 +688,19 @@ async def model_activate(payload: dict):
     ok, why = _manifest_ok(version_dir)
     if not ok:
         raise HTTPException(400, f"校验失败，拒绝切换：{why}")
+    if not _models_writable():
+        raise HTTPException(
+            409,
+            "模型目录是只读挂载，无法切换 current 软链。请把 api 的 models 挂载改成可写"
+            "（../models:/app/models）后重建 api。")
 
     cur = ROOT / "models/current"
-    if cur.is_symlink() or cur.exists():
-        cur.unlink()
-    cur.symlink_to(name)
+    try:
+        if cur.is_symlink() or cur.exists():
+            cur.unlink()
+        cur.symlink_to(name)
+    except OSError as exc:
+        raise HTTPException(409, f"切换 current 失败（{exc}）。") from exc
     for v, meta in reg["versions"].items():
         meta["status"] = "active" if v == name else "retired"
     from datetime import datetime
@@ -751,15 +756,187 @@ def _class_of_member(rel: str) -> str | None:
     return None
 
 
+def _batch_dir(batch: str) -> Path:
+    """上传批次的目录；名字做穿越校验，不存在时返回 404。"""
+    name = str(batch or "").strip()
+    if not name or "/" in name or name.startswith("."):
+        raise HTTPException(400, "批次名非法")
+    dest = UPLOAD_ROOT / name
+    if not dest.is_dir():
+        raise HTTPException(404, f"批次不存在或已删除: {name}")
+    return dest
+
+
+@router.get("/viz/api/dataset/training")
+def dataset_training():
+    """已准备好的训练集：train/val/test 张数、比例、来源。"""
+    return {"datasets": dataset_service.list_datasets()}
+
+
+@router.post("/viz/api/dataset/build")
+def dataset_build(payload: dict):
+    """把历史数据或某个上传批次切成 train/val/test 并生成 manifest。
+
+    默认 70/15/15，按工单整组切分（同一工单的照片不会同时出现在训练和测试）。
+    """
+    source = str(payload.get("source") or "all")
+    include_uploads = bool(payload.get("include_uploads", False))
+    ratios = {}
+    for key in ("train", "val", "test"):
+        if payload.get(key) is not None:
+            try:
+                ratios[key] = float(payload[key])
+            except (TypeError, ValueError):
+                raise HTTPException(422, f"{key} 必须是数字")
+    try:
+        manifest = dataset_service.build_dataset(
+            source=source, name=str(payload.get("name") or ""), ratios=ratios or None,
+            seed=int(payload.get("seed") or 42), include_uploads=include_uploads)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {k: manifest.get(k) for k in
+            ("name", "created_at", "source", "ratios", "counts", "total",
+             "orders", "classes", "warnings", "path")}
+
+
+@router.delete("/viz/api/dataset/training/{name}")
+def dataset_training_delete(name: str):
+    try:
+        return dataset_service.delete_dataset(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "数据集不存在") from exc
+
+
+@router.post("/viz/api/dataset/cleanup")
+def dataset_cleanup():
+    """清理文件已不存在的自动标注记录（换机/手动删批次后常见）。"""
+    removed = feedback_store.prune_missing_auto_labels()
+    return {"removed": removed}
+
+
 @router.get("/viz/api/dataset/batches")
 def dataset_batches():
     out = []
     if UPLOAD_ROOT.is_dir():
         for d in sorted(UPLOAD_ROOT.iterdir(), reverse=True):
+            if not d.is_dir():
+                continue
             meta = _load_json(d / "meta.json")
             if meta:
-                out.append({**meta, "batch": d.name})
-    return {"batches": out}
+                out.append({**meta, "batch": d.name, "exists": True})
+    # 数据库里有、磁盘上目录没了的旧批次：提示用户清理，而不是在队列里报“图片不存在”
+    orphans = []
+    for batch, count in feedback_store.auto_label_batches().items():
+        if not (UPLOAD_ROOT / batch).is_dir():
+            orphans.append({"batch": batch, "count": count})
+    return {"batches": out, "orphans": orphans,
+            "orphan_images": sum(o["count"] for o in orphans)}
+
+
+@router.get("/viz/api/dataset/{batch}")
+def dataset_detail(batch: str, limit: int = 500, offset: int = 0):
+    """批次详情：每张图的目录标签、自动标注、人工结论，供页面逐张复核。"""
+    dest = _batch_dir(batch)
+    meta = _load_json(dest / "meta.json")
+    auto = {str(_portable(r["path"])): r for r in
+            feedback_store.list_auto_labels(batch=batch, limit=5000)}
+    ann = {}
+    for path, row in feedback_store.annotations_for_batch(batch).items():
+        ann[str(_portable(path))] = row
+
+    files = [p for p in sorted(dest.rglob("*"))
+             if p.is_file() and p.suffix.lower() in IMG_EXT]
+    total = len(files)
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    items = []
+    for p in files[offset:offset + limit]:
+        key = str(p)
+        row = auto.get(key) or {}
+        a = ann.get(key) or {}
+        dir_label = p.parent.name
+        final = a.get("final_label") or dir_label
+        items.append({
+            "path": key,
+            "name": p.name,
+            "url": f"/viz/api/file?path={key}",
+            "dir_label": dir_label,
+            "auto_label": row.get("prediction") or "",
+            "confidence": row.get("confidence"),
+            "final_label": final,
+            "reviewed": bool(a),
+            "corrected": bool(a) and final != dir_label,
+        })
+
+    reviewed = sum(1 for p in files if str(p) in ann)
+    corrected = sum(1 for p in files
+                    if str(p) in ann and (ann[str(p)].get("final_label") or p.parent.name) != p.parent.name)
+    return {
+        "batch": batch,
+        "meta": meta,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "stats": {
+            "images": total,
+            "auto_labeled": len([p for p in files if str(p) in auto]),
+            "reviewed": reviewed,
+            "corrected": corrected,
+            "classes": dict(Counter(p.parent.name for p in files)),
+        },
+        "classes": [{"slug": meta["slug"],
+                     "name": dataset_service.LABEL_CN.get(meta["slug"], name)}
+                    for name, meta in CLASS_MAP.items()],
+        "items": items,
+    }
+
+
+@router.post("/viz/api/dataset/{batch}/labels")
+def dataset_save_labels(batch: str, payload: dict, request: Request):
+    """保存人工确认/修正的标签；训练集构建时会优先采用这些结论。"""
+    dest = _batch_dir(batch)
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise HTTPException(400, "items 不能为空")
+    accepted = []
+    for item in raw_items:
+        label = str(item.get("label") or "")
+        if label not in SLUG_SET and label not in ("uncertain", "exclude"):
+            raise HTTPException(422, f"未知标签: {label}")
+        try:
+            path = _safe(str(item.get("path") or ""))
+        except HTTPException:
+            continue
+        if not path.is_relative_to(dest.resolve()):
+            continue
+        accepted.append({"path": str(path), "label": label,
+                         "source_label": path.parent.name})
+    saved = feedback_store.set_manual_labels(batch, accepted, reviewer=_reviewer(request))
+    return {"saved": saved, "total": len(accepted)}
+
+
+@router.delete("/viz/api/dataset/{batch}")
+def dataset_delete(batch: str):
+    """删除上传批次：目录 + 自动标注 + 人工结论一起删，避免队列里留幽灵记录。"""
+    import shutil
+
+    name = batch.strip()
+    if not name or "/" in name or name.startswith("."):
+        raise HTTPException(400, "批次名非法")
+    dest = UPLOAD_ROOT / name
+    existed = dest.is_dir()
+    if existed:
+        shutil.rmtree(dest)
+    # 处理后的 8:2 临时目录也一并清掉
+    processed = ROOT / "data" / "processed" / "uploads" / name
+    if processed.is_dir():
+        shutil.rmtree(processed, ignore_errors=True)
+    records = feedback_store.delete_batch(name)
+    return {"deleted": name, "existed": existed, **records}
 
 
 @router.post("/viz/api/dataset/upload")
@@ -904,21 +1081,37 @@ def model_delete(payload: dict):
     if name not in (reg.get("versions") or {}):
         raise HTTPException(404, f"未注册的版本: {name}")
 
-    cur = ROOT / "models/current"
-    active = cur.resolve().name if cur.is_symlink() else None
+    active = _active_version()
     if name == active:
         raise HTTPException(400, "不能删除正在使用的版本，请先切到别的版本")
 
     version_dir = ROOT / "models" / name
-    if version_dir.is_dir() and payload.get("delete_files", True):
-        shutil.rmtree(version_dir, ignore_errors=True)
+    delete_files = bool(payload.get("delete_files", True))
+    if delete_files:
+        if not _models_writable():
+            raise HTTPException(
+                409,
+                "模型目录是只读挂载，权重删不掉。请在服务器上把 "
+                "deploy/docker-compose.yml 里 api 的 ../models:/app/models:ro "
+                "改成 ../models:/app/models 后重建 api；"
+                "或选择“仅从列表移除”（delete_files=false），文件保留。")
+        if version_dir.is_dir():
+            try:
+                shutil.rmtree(version_dir)
+            except OSError as exc:
+                raise HTTPException(
+                    409, f"删除权重目录失败（{exc}）。可改为仅从列表移除，文件保留。") from exc
 
     reg["versions"].pop(name, None)
     from datetime import datetime
     reg["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-    reg_path.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        reg_path.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(
+            409, f"模型注册表不可写（{exc}）。请检查 models 目录挂载权限。") from exc
     return {"deleted": name, "remaining": sorted(reg["versions"]),
-            "files_removed": bool(version_dir.is_dir() is False)}
+            "files_removed": not version_dir.is_dir()}
 
 
 @router.post("/viz/api/model/register")

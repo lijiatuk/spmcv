@@ -1,0 +1,114 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    ports:
+      # 上层系统直连。（也可走 nginx 入口）
+      - "${API_PORT:-8017}:8017"
+    environment:
+      VISION_URL: http://vision:8016
+      OCR_SERVICE_URL: http://ocr:8018
+      KEV_URL: ${KEV_URL:-http://10.51.13.7:8008/v1/systemone}
+      KEV_MODE: ${KEV_MODE:-fallback}
+      VLX_URL: ${VLX_URL:-http://10.51.13.7:8013}
+      PREPROCESS: ${PREPROCESS:-auto}
+      WEAK_SCENE_CONF: ${WEAK_SCENE_CONF:-0.70}
+      USE_VLX: ${USE_VLX:-0}  # 默认本地判定；置 1 可启用 VLX 交叉证据
+      ENABLE_FUSION: ${ENABLE_FUSION:-0}
+      # 单图分析硬超时。容器/跨网调用比裸机慢，先给 5s；
+      # 在 L20 上用 bench_api --max-p95-ms 实测后再收紧。
+      REQUEST_DEADLINE_S: ${REQUEST_DEADLINE_S:-5}
+      # 少图串行：并发会让 OCR 互相抢线程，出现「同样输入时好时坏」
+      SEQUENTIAL_PHOTOS: ${SEQUENTIAL_PHOTOS:-6}
+      # 接口准入：并发满了快速 429，不排队到超时
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-8}
+      ADMISSION_WAIT_S: ${ADMISSION_WAIT_S:-2}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+      API_KEYS: ${API_KEYS:-}
+      # 训练设备：auto 会自动选 cuda / mps / cpu。CPU 训练慢，生产建议有卡时用 cuda。
+      TRAIN_DEVICE: ${TRAIN_DEVICE:-auto}
+      SSO_MODE: ${SSO_MODE:-off}
+      SSO_OPEN_LOGIN_DOMAIN: ${SSO_OPEN_LOGIN_DOMAIN:-}
+      SSO_APP_CODE: ${SSO_APP_CODE:-}
+      SSO_POOL_CODE: ${SSO_POOL_CODE:-}
+      SSO_USER_BASE: ${SSO_USER_BASE:-}
+    volumes:
+      - ../data:/app/data
+      - ../docs:/app/docs:ro
+      # API 需要写 registry.json / current 软链（切版本、删版本）。
+      # 只读挂载会让“删除模型 / 切换模型”直接 500，页面只显示“服务内部错误”。
+      - ../models:/app/models
+      - ../var:/app/var
+    depends_on:
+      vision:
+        condition: service_healthy
+      ocr:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8017/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  vision:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.vision
+    ports:
+      # 上层系统直连。（也可走 nginx 入口）
+      - "${VISION_PORT:-8016}:8016"
+    environment:
+      # 只用一个变量指定版本；模型目录按 models/<版本>/weights/<role>.pt 解析
+      MODEL_DIR: /app/models/current
+      VISION_DEVICE: cuda
+      VISION_IMGSZ: ${VISION_IMGSZ:-512}
+      VISION_ACTION_IMGSZ: ${VISION_ACTION_IMGSZ:-512}
+      VISION_LOAD_AUX: ${ENABLE_FUSION:-0}
+    volumes:
+      # models/current 是软链，切版本只改宿主机软链 + 重启容器
+      - ../models:/app/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # 只把指定的一张卡给 vision（count: 1 会拿到 0 号卡）
+              # 改成 GPU_ID=4 之类即可钉到某张卡
+              device_ids: ['${GPU_ID:-0}']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8016/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ocr:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ocr
+    ports:
+      # 上层系统直连。（也可走 nginx 入口）
+      - "${OCR_PORT:-8018}:8018"
+    environment:
+      OCR_PROVIDER: rapidocr
+      OCR_PLATE_SERVER: ${OCR_PLATE_SERVER:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8018/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${HOST_PORT:-8020}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

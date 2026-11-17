@@ -1,0 +1,16 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+await p.goto("http://127.0.0.1:8017/ui/console.html#infer", { waitUntil: "networkidle" });
+const dir = "/Users/deepway/data/spmcv/data/SPM系统AI识别训练照片_新增_20261111-20261113/01_接车照片/02_行驶证VIN";
+const { readdir } = await import("node:fs/promises");
+const fs = (await readdir(dir)).filter(f => /\.(png|jpg)$/i.test(f)).slice(0,2).map(f => `${dir}/${f}`);
+await p.setInputFiles("#files", fs);
+await p.waitForSelector("#inferImgWrap:not([hidden])");
+await p.click("#catSeg button[data-cat=arrival]");
+await p.click("#run");
+await p.waitForSelector("#out .card", { timeout: 120000 });
+await p.waitForTimeout(1500);
+await p.screenshot({ path: "/tmp/ui_shots/12_infer_v2.png" });
+console.log("boxes:", await p.locator("#inferBoxes .bx").count());
+await b.close();

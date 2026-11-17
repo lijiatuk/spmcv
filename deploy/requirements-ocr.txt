@@ -1,0 +1,4 @@
+# 基础依赖见 requirements-base.txt
+rapidocr==3.10.0
+onnxruntime==1.20.1
+opencv-python-headless==4.10.0.84

@@ -1,0 +1,23 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+const logs = [];
+p.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
+p.on("pageerror", (e) => logs.push(`[pageerror] ${e}`));
+await p.goto("http://127.0.0.1:8017/ui/console.html", { waitUntil: "networkidle" });
+await p.click('.nav-item[data-view="dataset"]');
+await p.waitForSelector("#classes .cls");
+await p.click("#classes .cls >> nth=0");
+await p.waitForSelector("#cards .card-row");
+await p.click("#cards .card-row >> nth=0");
+await p.waitForTimeout(2500);
+console.log("boxes:", await p.locator("#vBoxes .bx").count());
+console.log("vBoxes html:", (await p.locator("#vBoxes").innerHTML()).slice(0, 200));
+console.log("meta text:", await p.textContent("#vMeta"));
+console.log("boxesOn:", await p.evaluate(() => window.__v?.boxesOn));
+console.log("modal-img rect:", await p.evaluate(() => {
+  const el = document.querySelector(".modal-img"); const r = el.getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width, h: r.height, pos: getComputedStyle(el).position };
+}));
+console.log("logs:", logs.slice(0, 10).join("\n"));
+await b.close();

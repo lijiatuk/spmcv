@@ -1,0 +1,13 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+await p.goto("http://127.0.0.1:8017/ui/console.html", { waitUntil: "networkidle" });
+await p.click('.nav-item[data-view="model"]');
+await p.waitForSelector("#modelTable table");
+await p.screenshot({ path: "/tmp/ui_shots/08_model.png" });
+await p.click('.nav-item[data-view="label"]');
+await p.waitForSelector("#lGrid .lcard");
+await p.waitForFunction(() => document.querySelectorAll("#lGrid .lcard .bx").length >= 3, { timeout: 25000 }).catch(()=>{});
+await p.waitForTimeout(1500);
+await p.screenshot({ path: "/tmp/ui_shots/09_label2.png" });
+await b.close();
