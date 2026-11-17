@@ -65,9 +65,7 @@ async def run(args: argparse.Namespace) -> dict:
                     results.append({
                         "status": response.status_code,
                         "latency_ms": elapsed,
-                        "business_decision": payload.get("decision"),
-                        "workflow_ok": payload.get("ok"),
-                        "need_review": payload.get("need_review"),
+                        "business_result": payload.get("result"),
                         "photo_latency_ms": [photo.get("latency_ms") for photo in photos
                                              if isinstance(photo, dict)
                                              and photo.get("latency_ms") is not None],
@@ -106,11 +104,9 @@ async def run(args: argparse.Namespace) -> dict:
     succeeded = sum(200 <= row["status"] < 300 for row in results)
     error_rate = (len(results) - succeeded) / len(results) if results else None
     p95 = percentile(latency, 0.95)
-    business_decisions = Counter(
-        row["business_decision"] for row in results if row.get("business_decision")
+    business_results = Counter(
+        row["business_result"] for row in results if row.get("business_result")
     )
-    workflow_outcomes = Counter(str(row["workflow_ok"]).lower() for row in results
-                                if row.get("workflow_ok") is not None)
     checks = []
     if args.max_error_rate is not None:
         checks.append(error_rate is not None and error_rate <= args.max_error_rate)
@@ -122,8 +118,7 @@ async def run(args: argparse.Namespace) -> dict:
         "api_contract": contract,
         "model_versions": sorted({version for row in results
                                    for version in row.get("model_versions", [])}),
-        "business_decision_counts": dict(business_decisions),
-        "workflow_ok_counts": dict(workflow_outcomes),
+        "business_result_counts": dict(business_results),
         "request_count": len(results),
         "virtual_users": args.vus,
         "photo_count_per_request": len(images),

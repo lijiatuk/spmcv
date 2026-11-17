@@ -86,8 +86,8 @@ async def workorder(images: list[UploadFile] = File(...),
     metrics.end(elapsed, review=bool(summary["need_review"]), kind="workorder")
     return {
         "work_order_id": work_order_id,
-        "auto_approved": summary["auto_approved"],
-        "need_review": summary["need_review"],
+        # 与三个分场景接口同一个结论字段：pass 才代表整单可自动通过
+        "result": "pass" if summary["auto_approved"] else "review",
         "review_reasons": summary["review_reasons"],
         "codes": reason_codes(summary["review_reasons"]),
         "vin": summary["vin"],

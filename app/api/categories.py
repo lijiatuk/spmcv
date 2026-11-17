@@ -152,6 +152,28 @@ def _briefs(items: list[dict]) -> list[dict]:
     return [it["_brief"] for it in items]
 
 
+def _finalize(payload: dict) -> dict:
+    """把内部 ok/status 收敛成对外唯一结论字段 ``result``。
+
+    上层只认这一个字段，避免同时出现 ok / status / decision 三个近似含义：
+
+      pass     本次请求的业务校验全部通过（arrival 还要求四件套齐全且 VIN 一致）
+      partial  已提交的照片通过，但本场景照片没交齐（仅 arrival 会出现）
+      review   存在不通过原因，需人工；具体看 reasons / codes / photos
+    """
+    ok = bool(payload.pop("ok", False))
+    status = payload.pop("status", None)
+    payload.pop("decision", None)    # 旧字段，统一收敛到 result
+    payload.pop("need_review", None)  # 顶层不再给第二个结论，逐图仍保留
+    if not ok:
+        payload["result"] = "review"
+    elif status == "partial":
+        payload["result"] = "partial"
+    else:
+        payload["result"] = "pass"
+    return payload
+
+
 @router.post("/arrival")
 async def arrival(images: list[UploadFile] = File(...), boxes: bool = False,
                   expected_plate: str = Form(""), expected_odometer: str = Form(""),
@@ -177,10 +199,9 @@ async def arrival(images: list[UploadFile] = File(...), boxes: bool = False,
                             require_complete=bool(strict))
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
-    out["need_review"] = not out["ok"]
     out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
-    return out
+    return _finalize(out)
 
 
 @router.post("/repair")
@@ -196,10 +217,9 @@ async def repair(images: list[UploadFile] = File(...),
     out = summarize_repair(inside, axle_type=axle_type)
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
-    out["need_review"] = not out["ok"]
     out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
-    return out
+    return _finalize(out)
 
 
 @router.post("/inspection")
@@ -211,10 +231,9 @@ async def inspection(images: list[UploadFile] = File(...),
     out = summarize_inspection(inside)
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
-    out["need_review"] = not out["ok"]
     out["codes"] = reason_codes(out.get("reasons") or [])
     _include_ocr_errors(out, inside + outside)
-    return out
+    return _finalize(out)
 
 
 # ---------------- 对外统一入口 ----------------
@@ -281,7 +300,7 @@ def _include_ocr_errors(payload: dict, items: list[dict]) -> None:
     reasons.extend(messages)
     payload["reasons"] = list(dict.fromkeys(reasons))
     payload["codes"] = reason_codes(payload["reasons"])
-    payload["need_review"] = True
+    # OCR 异常一票记为 review：_finalize 会据此把 result 置为 review
     if "ok" in payload:
         payload["ok"] = False
 
@@ -313,7 +332,7 @@ async def scan(
       - 单张时也能调用，返回单图结论，不会因为"四件套不齐"直接失败。
 
     产品化的关键区别：**VIN/字段读不出不再一票否决**，而是返回
-    `decision=review` + 具体原因码，让上层自己决定要不要拦。
+    `result=review` + 具体原因码，让上层自己决定要不要拦。
     """
     if category and category not in SCENE_BY_CATEGORY:
         raise HTTPException(422, detail={"code": "INVALID_PARAMS",
@@ -347,20 +366,16 @@ async def scan(
                                     expected_odometer=odo_expect,
                                     require_complete=bool(strict))
         payload.update(summary)
-        payload["decision"] = "pass" if summary["ok"] else "review"
     elif category == "repair":
         summary = summarize_repair(inside, axle_type)
         payload.update(summary)
-        payload["decision"] = "pass" if summary["ok"] else "review"
     elif category == "inspection":
         summary = summarize_inspection(inside, expected_vin)
         payload.update(summary)
-        payload["decision"] = "pass" if summary["ok"] else "review"
     else:
         # 没传 category：只给每张图是什么，不判定业务
-        payload["decision"] = "review"
         payload["reasons"] = ["未指定 category，仅返回场景识别结果"]
 
     payload["codes"] = reason_codes(payload.get("reasons") or [])
     _include_ocr_errors(payload, inside + outside)
-    return payload
+    return _finalize(payload)

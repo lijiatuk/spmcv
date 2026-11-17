@@ -109,13 +109,14 @@ def main() -> int:
             s["images"] += len(files)
             s["latency"].append(dt)
             s["wrong_cat"] += len(d.get("unexpected") or [])
-            if d.get("ok"):
+            # partial 也算「已提交的图通过」，和旧 ok 口径一致
+            if d.get("result") in ("pass", "partial"):
                 s["ok"] += 1
                 cats_ok += 1
             for reason in d.get("reasons") or []:
                 s["reasons"][reason.split("：")[0]] += 1
 
-            rec["result"][cat] = {"ok": d.get("ok"), "n": len(files),
+            rec["result"][cat] = {"result": d.get("result"), "n": len(files),
                                   "reasons": d.get("reasons"),
                                   "wrong": len(d.get("unexpected") or []),
                                   "ms": round(dt)}

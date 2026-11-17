@@ -31,8 +31,9 @@ def test_arrival_endpoint_single_photo(monkeypatch):
     r = client.post("/v1/arrival", files={"images": ("plate.jpg", b"x", "image/jpeg")})
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is True
-    assert body["status"] == "partial"
+    # 对外只暴露一个结论字段 result：pass / partial / review
+    assert body["result"] == "partial"
+    assert "ok" not in body and "status" not in body
     assert body["reasons"] == []
     assert body["codes"] == []
     assert "license_vin" in body["missing_scenes"]
@@ -48,7 +49,6 @@ def test_arrival_endpoint_strict_requires_four(monkeypatch):
                     files={"images": ("plate.jpg", b"x", "image/jpeg")})
     assert r.status_code == 200
     body = r.json()
-    assert body["ok"] is False
-    assert body["status"] == "review"
+    assert body["result"] == "review"
     assert any("未提交" in reason for reason in body["reasons"])
     assert "MISSING_ODOMETER" not in body["codes"]

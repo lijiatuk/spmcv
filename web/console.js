@@ -652,16 +652,19 @@
 
     // 只交了车头照时，整单四件套本来就不齐；这时说“可自动通过”会误导，
     // 说“需人工复核”又等于把好图判坏。用第三种状态把边界讲清楚。
-    const partial = d.ok === true && d.complete === false;
-    const verdict = el("div", "verdict " + (d.ok ? (partial ? "partial" : "ok") : "warn"));
-    verdict.append(el("span", "v-ico", d.ok ? (partial ? "◐" : "✓") : "!"));
+    // result: pass / partial / review，判定只看这一个字段
+    const partial = d.result === "partial";
+    const passed = d.result === "pass";
+    const verdict = el("div", "verdict " + (passed ? "ok" : partial ? "partial" : "warn"));
+    verdict.append(el("span", "v-ico", passed ? "✓" : partial ? "◐" : "!"));
     const vMain = el("div");
-    vMain.append(el("div", "v-t", d.ok ? (partial ? "本张通过（整单未校验）" : "可自动通过") : "需人工复核"),
-      el("div", "v-s", d.ok
-        ? (partial
+    vMain.append(el("div", "v-t",
+      passed ? "可自动通过" : partial ? "本张通过（整单未校验）" : "需人工复核"),
+      el("div", "v-s", passed
+        ? `${CATS[cat].name} ${insideN} 张，未命中拦截规则`
+        : partial
           ? `${CATS[cat].name} ${insideN} 张已识别；整单还缺其他照片，未做一致性校验`
-          : `${CATS[cat].name} ${insideN} 张，未命中拦截规则`)
-        : (reasons[0] || "存在需要人工确认的项")));
+          : (reasons[0] || "存在需要人工确认的项")));
     verdict.append(vMain);
     if (d.degraded) verdict.append(el("span", "tag warn", "部分照片超时"));
     wrap.append(verdict);

@@ -127,7 +127,8 @@
     const head = el("div", "head");
     head.append(
       el("div", "name", `${CATS[cat].name} · ${d.photos.length} 张`),
-      el("span", "badge " + (d.ok ? "ok" : "warn"), d.ok ? "通过" : "复核"),
+      el("span", "badge " + (d.result === "pass" ? "ok" : "warn"),
+         d.result === "pass" ? "通过" : d.result === "partial" ? "未校验" : "复核"),
     );
     const seen = (d.photos || []).map((p) => SCENE[p.scene] || p.scene).filter(Boolean);
     const uniq = [...new Set(seen)];

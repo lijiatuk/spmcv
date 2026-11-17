@@ -74,7 +74,8 @@ def meta():
         "contract": {
             "api_version": "v1",
             "taxonomy_version": "v1",
-            "decision_values": ["pass", "review"],
+            # 对外唯一结论字段 result 的取值；partial 仅 arrival 会出现
+            "result_values": ["pass", "partial", "review"],
             "machine_codes": True,
             "model_version_in_photo_result": True,
             "auxiliary_fusion_enabled": settings.enable_fusion,

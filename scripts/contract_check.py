@@ -3,7 +3,7 @@
 
 上层系统接入前跑一遍，确认文档里写的和实际返回的一致：
   - 错误结构统一（code/message/request_id）
-  - decision 取值合法、codes 是机器码
+  - result 取值合法、codes 是机器码
   - 每张图带 model_version，能发现"切了模型但没重启"
   - 请求 ID 原样回传
   - 参数非法时给 422 而不是 500
@@ -61,9 +61,9 @@ def main() -> int:
     contract = meta.get("contract") or {}
     check("api_version 存在", bool(contract.get("api_version")))
     check("taxonomy_version 存在", bool(contract.get("taxonomy_version")))
-    check("decision 取值含 pass/review",
-          set(contract.get("decision_values") or []) >= {"pass", "review"},
-          str(contract.get("decision_values")))
+    check("result 取值含 pass/partial/review",
+          set(contract.get("result_values") or []) >= {"pass", "partial", "review"},
+          str(contract.get("result_values")))
 
     print("\n[正常调用]")
     r = client.post("/v1/scan", files=files, headers={"X-Request-Id": rid})
@@ -71,7 +71,7 @@ def main() -> int:
     check("回传 X-Request-Id", r.headers.get("x-request-id") == rid,
           r.headers.get("x-request-id", ""))
     d = r.json() or {}
-    check("decision 合法", d.get("decision") in {"pass", "review"}, str(d.get("decision")))
+    check("result 合法", d.get("result") in {"pass", "partial", "review"}, str(d.get("result")))
     check("codes 是字符串数组", isinstance(d.get("codes"), list)
           and all(isinstance(c, str) for c in d.get("codes", [])))
     check("codes 是机器码（无中文）",
@@ -89,7 +89,7 @@ def main() -> int:
     r2 = client.post("/v1/scan", files=files,
                      data={"category": "arrival", "expected_plate": "京A00000"})
     d2 = r2.json() or {}
-    check("车牌不符时 decision=review", d2.get("decision") == "review", str(d2.get("decision")))
+    check("车牌不符时 result=review", d2.get("result") == "review", str(d2.get("result")))
     check("给出 PLATE_MISMATCH 映射或相关码",
           any(c in d2.get("codes", []) for c in ("PLATE_MISMATCH", "VIN_MISMATCH"))
           or bool(d2.get("plate")) is False,

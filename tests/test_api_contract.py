@@ -12,7 +12,7 @@ def test_meta_exposes_versioned_contract_and_limits():
     payload = response.json()
     assert payload["contract"]["api_version"] == "v1"
     assert payload["contract"]["taxonomy_version"] == "v1"
-    assert payload["contract"]["decision_values"] == ["pass", "review"]
+    assert payload["contract"]["result_values"] == ["pass", "partial", "review"]
     assert payload["limits"]["max_photos"] > 0
     assert payload["model"]["configured_version"]
     assert payload["model"]["manifest_sha256"]
@@ -70,5 +70,4 @@ def test_ocr_timeout_is_exposed_as_stable_photo_and_workflow_code():
     payload = {"ok": True}
     categories._include_ocr_errors(payload, [{"_brief": {"ocr_error_code": "OCR_TIMEOUT"}}])
     assert payload["ok"] is False
-    assert payload["need_review"] is True
     assert "OCR_TIMEOUT" in payload["codes"]

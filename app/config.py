@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", extra="ignore")
 
     app_name: str = "SPM Vision API"
-    version: str = "2.0"
+    version: str = "2.1"
     api_prefix: str = "/v1"
 
     vision_url: str = "http://127.0.0.1:8016"
