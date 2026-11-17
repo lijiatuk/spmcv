@@ -20,3 +20,5 @@ docs/
 deploy/
 tools/
 examples/
+
+.env
