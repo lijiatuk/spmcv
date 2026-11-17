@@ -89,6 +89,87 @@ def _detect_box(data: bytes, filename: str, text: str, wanted,
         return None
 
 
+# 服务单末页的签字/盖章检测阈值。
+# 签字框通常只有 100~200px，检测器默认 0.25 会把一半真签字漏掉
+# （用户 13 张末页实测：0.25 → 7 张，0.10 → 11 张）；盖章本来就稳，保持 0.25。
+SIGN_CONF = 0.10
+STAMP_CONF = 0.25
+# 整页拍歪 90°/270° 时检测器会全空，用旋转兜底；旋转是猜测，
+# 所以门槛提高，避免在转错方向时凭空造出一个签字/盖章。
+SIGN_ROTATED_CONF = 0.30
+STAMP_ROTATED_CONF = 0.50
+
+SIGN_LABELS = ("signature", "stamp", "service_sheet")
+
+
+def _label_boxes(raw: dict) -> list[dict]:
+    """把检测结果收敛成 {label, score, box}，只留末页关心的三类。"""
+    out = []
+    for b in raw.get("boxes") or []:
+        label = str(b.get("label") or "")
+        box = list(b.get("box") or [])[:4]
+        if label not in SIGN_LABELS or len(box) < 4:
+            continue
+        out.append({"label": label, "score": float(b.get("score") or 0.0),
+                    "box": [float(v) for v in box]})
+    return out
+
+
+def _service_sign_boxes(data: bytes, filename: str) -> tuple[list[dict], int | None]:
+    """末页签字/盖章：低阈值检测 + 旋转兜底。
+
+    返回 (boxes, rotated)。boxes 里的坐标始终是**原图**坐标，
+    旋转兜底命中的框会映射回来，前端画框不会错位。
+    """
+    def scan(payload: bytes) -> list[dict]:
+        try:
+            return _label_boxes(VISION.detect(payload, filename, "", SIGN_CONF))
+        except Exception:
+            return []
+
+    boxes = scan(data)
+
+    def found(label: str, limit: float) -> bool:
+        return any(b["label"] == label and b["score"] >= limit for b in boxes)
+
+    missing = {label for label, limit in (("signature", SIGN_CONF),
+                                          ("stamp", STAMP_CONF))
+               if not found(label, limit)}
+    if not missing:
+        return boxes, None
+
+    try:
+        width, height = _image_size(data)
+    except Exception:
+        return boxes, None
+
+    # 只接住「原来缺的那一项」，旋转图里重复检出的另一项不要，
+    # 否则 rotated_detection 会变成没有意义的噪声。
+    # 不能一命中就 break：转了 90° 可能只找到盖章，签字要转到 270° 才出来。
+    used_angle = None
+    for angle in (90, 270):
+        try:
+            alt = scan(_rotate_image(data, angle))
+        except Exception:
+            continue
+        extra = []
+        for b in alt:
+            if b["label"] not in missing:
+                continue
+            limit = SIGN_ROTATED_CONF if b["label"] == "signature" else STAMP_ROTATED_CONF
+            if b["score"] < limit:
+                continue
+            x1, y1, x2, y2 = _box_to_original(b["box"], angle, width, height)
+            extra.append({**b, "box": [x1, y1, x2, y2]})
+            missing.discard(b["label"])
+        if extra:
+            boxes.extend(extra)
+            used_angle = angle
+        if not missing:
+            break
+    return boxes, used_angle
+
+
 DET_SLUG = [
     (("license_plate", "vehicle_front"), "arrival_plate"),
     (("driving_license",), "license_vin"),
@@ -574,22 +655,15 @@ def _character(slug: str, data: bytes, filename: str,
                 "review_reasons": [],
                 "statement": vlx.get("message") or "服务单末页检测完成",
             }
-        try:
-            raw = VISION.detect(data, filename, "")
-            boxes = [
-                {"label": b.get("label"), "score": b.get("score"),
-                 "xmin": (b.get("box") or [0, 0, 0, 0])[0],
-                 "ymin": (b.get("box") or [0, 0, 0, 0])[1],
-                 "xmax": (b.get("box") or [0, 0, 0, 0])[2],
-                 "ymax": (b.get("box") or [0, 0, 0, 0])[3]}
-                for b in raw.get("boxes") or []
-                if b.get("label") in ("signature", "stamp", "service_sheet")
-            ]
-        except Exception:
-            boxes = []
-        labels = {str(b.get("label") or "") for b in boxes}
-        has_sig = "signature" in labels
-        has_stamp = "stamp" in labels
+        raw_boxes, rotated = _service_sign_boxes(data, filename)
+        boxes = [{"label": b["label"], "score": round(b["score"], 4),
+                  "xmin": b["box"][0], "ymin": b["box"][1],
+                  "xmax": b["box"][2], "ymax": b["box"][3]}
+                 for b in raw_boxes]
+        has_sig = any(b["label"] == "signature" and b["score"] >= SIGN_CONF
+                      for b in raw_boxes)
+        has_stamp = any(b["label"] == "stamp" and b["score"] >= STAMP_CONF
+                        for b in raw_boxes)
         reasons = []
         if not has_sig:
             reasons.append("未检测到客户签字")
@@ -598,7 +672,9 @@ def _character(slug: str, data: bytes, filename: str,
         return {
             "scene": "service_sign", "scene_group": "service_sign",
             "conclusion": None,
-            "evidence": {"classifier": slug, "boxes": boxes},
+            "evidence": {"classifier": slug, "boxes": boxes,
+                         # 旋转兜底命中时记录角度，便于排查"框画歪了"
+                         "rotated_detection": rotated},
             "fields": None,
             "need_review": bool(reasons),
             "review_reasons": reasons,
