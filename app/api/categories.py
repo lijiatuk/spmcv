@@ -29,6 +29,7 @@ from app.metrics import metrics
 from app.services.categories import (
     ARRIVAL_SCENES,
     INSPECTION_SCENES,
+    PHOTO_LABEL,
     REPAIR_SCENES,
     SCENE_LABEL,
     summarize_arrival,
@@ -115,7 +116,7 @@ async def _collect(images: list[UploadFile], allowed: tuple[str, ...],
             "index": idx,
             "filename": upload.filename,
             "scene": scene,
-            "scene_label": SCENE_LABEL.get(scene, scene),
+            "scene_label": PHOTO_LABEL.get(scene, SCENE_LABEL.get(group, scene)),
             "confidence": res.get("scene_confidence"),
             "model_version": res.get("model_version"),
             "latency_ms": res.get("latency_ms"),
@@ -228,7 +229,7 @@ async def inspection(images: list[UploadFile] = File(...),
                      boxes: bool = False):
     """项目检查表：服务单首页 VIN、末页签字与盖章。"""
     inside, outside = await _collect(images, INSPECTION_SCENES, with_boxes=boxes)
-    out = summarize_inspection(inside)
+    out = summarize_inspection(inside, expected_vin=expected_vin)
     out["photos"] = _briefs(inside)
     out["unexpected"] = _briefs(outside)
     out["codes"] = reason_codes(out.get("reasons") or [])
@@ -247,8 +248,11 @@ REASON_CODES = [
     ("未识别到车架 VIN", "MISSING_FRAME_VIN"),
     ("行驶证 VIN 校验位不通过", "VIN_CHECKSUM_FAILED"),
     ("车架 VIN 校验位不通过", "VIN_CHECKSUM_FAILED"),
+    ("服务单 VIN 校验位不通过", "VIN_CHECKSUM_FAILED"),
     ("有 VIN 未通过校验位", "VIN_CHECKSUM_FAILED"),
     ("VIN 不一致", "VIN_MISMATCH"),
+    ("VIN 与工单不一致", "VIN_MISMATCH"),
+    ("VIN 尾段", "VIN_MISMATCH"),
     ("车牌与工单不一致", "PLATE_MISMATCH"),
     ("里程与工单相差", "ODOMETER_MISMATCH"),
     ("非汉德桥缺少桥放油", "MISSING_DRAIN_PHOTO"),

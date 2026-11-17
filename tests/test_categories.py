@@ -205,6 +205,48 @@ def test_inspection_missing_sign_page():
     assert any("缺少服务单末页" in r for r in out["reasons"])
 
 
+def test_inspection_bad_vin_checksum_blocks():
+    """首页 VIN 读到了但校验位不过，不能因为签字盖章齐就 pass。"""
+    items = [
+        photo("service_front", {"vin": "ALC3J2V13TA603182", "vin_checksum_ok": False}),
+        photo("service_sign", boxes=[{"label": "signature"}, {"label": "stamp"}]),
+    ]
+    out = summarize_inspection(items)
+    assert out["ok"] is False
+    assert any("校验位" in r for r in out["reasons"])
+
+
+def test_inspection_expected_vin_mismatch_blocks():
+    items = [
+        photo("service_front", {"vin": "HLC3J2VEXSA603850"}),
+        photo("service_sign", boxes=[{"label": "signature"}, {"label": "stamp"}]),
+    ]
+    out = summarize_inspection(items, expected_vin="HLC3J2VEXSA603851")
+    assert out["ok"] is False
+    assert any("服务单 VIN 与预期不一致" in r for r in out["reasons"])
+
+
+def test_inspection_expected_vin_match_passes():
+    items = [
+        photo("service_front", {"vin": "HLC3J2VEXSA603850"}),
+        photo("service_sign", boxes=[{"label": "signature"}, {"label": "stamp"}]),
+    ]
+    out = summarize_inspection(items, expected_vin="hlc3j2vexsa603850")
+    assert out["ok"] is True
+
+
+def test_inspection_expected_vin_not_compared_when_partial():
+    """只有尾段时不能拿空值和工单比，仍按"仅尾段"转人工。"""
+    items = [
+        photo("service_front", {"vin_partial": "603850"}),
+        photo("service_sign", boxes=[{"label": "signature"}, {"label": "stamp"}]),
+    ]
+    out = summarize_inspection(items, expected_vin="HLC3J2VEXSA603850")
+    assert out["ok"] is False
+    assert any("仅识别到尾段" in r for r in out["reasons"])
+    assert not any("与预期不一致" in r for r in out["reasons"])
+
+
 def test_arrival_ignores_vin_failing_checksum():
     """仪表盘上拼出来的假 VIN 不能制造"不一致"结论。
 

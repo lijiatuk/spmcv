@@ -56,11 +56,8 @@ class SPMClient:
 
 def handle(result: dict) -> str:
     """把结果翻译成业务动作——上层真正要写的就是这一段。"""
-    if result.get("degraded"):
-        return "转人工：分析超时，结果不完整"
-    decision = result.get("decision")
     codes = result.get("codes") or []
-    if decision == "pass":
+    if result.get("result") == "pass":
         return "自动通过"
     if "VIN_MISMATCH" in codes or "SERVICE_VIN_MISMATCH" in codes:
         return "人工必审：VIN 与工单不一致"
@@ -86,7 +83,7 @@ def main() -> int:
 
     photos = [Path(p) for p in args.photo]
     result = cli.scan(photos, args.category, args.expected_plate, args.expected_odometer)
-    print(f"\n{len(photos)} 张 → decision={result.get('decision')}  codes={result.get('codes')}")
+    print(f"\n{len(photos)} 张 → result={result.get('result')}  codes={result.get('codes')}")
     for p in result.get("photos") or []:
         print(f"  [{p.get('index')}] {p.get('scene'):<14} conf={p.get('confidence')} {p.get('filename')}")
     print("\n业务动作:", handle(result))

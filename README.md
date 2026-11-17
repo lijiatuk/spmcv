@@ -8,7 +8,7 @@
 - 当前运行版本 `v5.1.0`，场景模型 5 折按工单严格 OOF 为 **86.98% (1,136/1,306)**；新域 **82.21% (624/759)**。这反映当前目录标签的一致性，不等同于人工黄金集准确率或整单通过率。
 - API 融合默认关闭。当前辅助头与场景头版本未对齐；新的辅助头只作为候选训练，完成全部折外与整单验收前不激活。
 - 快速标注台按可见证据复核，支持 `other/uncertain`、证据/动作属性、备注、撤销、SQLite 审计和 CSV 导出。详细口径见 [`docs/labeling_guide_v1.md`](docs/labeling_guide_v1.md)。
-- 上线与日常迭代见 [`docs/上线方案.md`](docs/上线方案.md)；业务系统联调见 [`docs/API接口说明.md`](docs/API接口说明.md)；训练/验收/发布流程见 [`docs/model_lifecycle.md`](docs/model_lifecycle.md)，部署步骤见 [`deploy/README.md`](deploy/README.md)。
+- 上线与日常迭代见 [`docs/上线方案.md`](docs/上线方案.md)；业务系统联调见 [`docs/上层调用接口文档.md`](docs/上层调用接口文档.md)；训练/验收/发布流程见 [`docs/model_lifecycle.md`](docs/model_lifecycle.md)，部署步骤见 [`deploy/README.md`](deploy/README.md)。
 - 新旧数据、训练内目录回放、分组 OOF 和完整工单黄金集是不同口径；旧段落中的历史单折/规格图片数字不得当作当前 OOF 或生产 SLA。
 
 ## 1. 目录

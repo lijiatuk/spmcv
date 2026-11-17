@@ -61,6 +61,32 @@ def test_scan_without_category_is_review(client):
     assert "decision" not in body
 
 
+def test_scan_inspection_with_expected_vin_does_not_500(client):
+    """回归：summarize_inspection() 以前只收 1 个参数，scan 传 2 个会 500。"""
+    r = client.post("/v1/scan",
+                    files={"images": ("a.jpg", b"x", "image/jpeg")},
+                    data={"category": "inspection", "expected_vin": "HLC3J2VEXSA603850"})
+    assert r.status_code == 200, r.text
+    assert r.json()["result"] == "review"  # 没图，按缺 VIN/缺末页转复核
+
+
+def test_inspection_forwards_expected_vin(client, monkeypatch):
+    captured: dict = {}
+
+    def fake_summary(items, expected_vin=""):
+        captured["expected_vin"] = expected_vin
+        return {"category": "inspection", "ok": True, "service_front_vin": "A",
+                "service_front_vin_partial": None, "signature": True, "stamp": True,
+                "present": [], "reasons": []}
+
+    monkeypatch.setattr(categories, "summarize_inspection", fake_summary)
+    body = client.post("/v1/inspection",
+                       files={"images": ("a.jpg", b"x", "image/jpeg")},
+                       data={"expected_vin": "HLC3J2VEXSA603850"}).json()
+    assert captured["expected_vin"] == "HLC3J2VEXSA603850"
+    assert body["result"] == "pass"
+
+
 def test_workorder_exposes_result_not_auto_approved(client, monkeypatch):
     async def fake_read_images(uploads):
         return [b"x" for _ in uploads]

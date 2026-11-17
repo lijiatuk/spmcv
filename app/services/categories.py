@@ -26,6 +26,18 @@ SCENE_LABEL = {
     "service_front": "服务单首页", "service_sign": "服务单末页",
 }
 
+# 逐图结果是按 12 类 slug 给出的，SCENE_LABEL 却是按 group 建的键。
+# 少了这张表，bridge_drain/filter_has 会原样回英文 slug，前端直接展示成
+# "bridge_drain"，和文档里的"场景中文名"不符。
+PHOTO_LABEL = {
+    "arrival_plate": "车头及车牌", "license_vin": "行驶证VIN",
+    "frame_vin": "车架贴牌VIN", "odometer": "里程表",
+    "bridge_drain": "桥放油", "bridge_fill": "桥加油",
+    "tire_drain": "轮胎放油", "tire_fill": "轮胎加油",
+    "filter_none": "无滤芯", "filter_has": "有滤芯",
+    "service_front": "服务单首页", "service_sign": "服务单末页",
+}
+
 ACTION_LABEL = {"fill": "加油", "drain": "放油", "has": "有滤芯", "none": "无滤芯"}
 
 
@@ -253,8 +265,12 @@ def summarize_repair(items: list[dict], axle_type: str = "") -> dict:
     }
 
 
-def summarize_inspection(items: list[dict]) -> dict:
-    """检查表：首页 VIN（常见只手写尾段）+ 末页签字盖章。"""
+def summarize_inspection(items: list[dict], expected_vin: str = "") -> dict:
+    """检查表：首页 VIN（常见只手写尾段）+ 末页签字盖章。
+
+    ``expected_vin`` 是工单声明的 VIN：只在首页读到完整 VIN 时比对；
+    读不出或只有尾段时仍按原规则转复核，不拿空值与工单比。
+    """
     front = _first(items, "service_front")
     sign = _first(items, "service_sign")
 
@@ -271,6 +287,12 @@ def summarize_inspection(items: list[dict]) -> dict:
         reasons.append("服务单首页未识别到 VIN")
     elif not vin and partial:
         reasons.append(f"VIN 仅识别到尾段 {partial}")
+    if vin and fields.get("vin_checksum_ok") is False:
+        reasons.append(f"服务单 VIN 校验位不通过（{vin}），需人工核对")
+    if vin and expected_vin:
+        want = _norm(expected_vin)
+        if want and want != vin:
+            reasons.append(f"服务单 VIN 与预期不一致：{vin} ≠ {expected_vin}")
     if sign is None:
         reasons.append("缺少服务单末页")
     else:
