@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.services.checker import (
     check_arrival,
     check_inspection,
+    check_photo,
     check_repair,
     evaluate,
 )
@@ -227,3 +228,41 @@ def test_inspection_missing_front_fails():
 def test_unknown_requirement():
     out = evaluate("foo", [])
     assert out["ok"] is False
+
+
+# ---------------- 单个细分场景 ----------------
+
+def test_photo_plate_unread_passes():
+    out = check_photo("arrival_plate", item("arrival_plate"))
+    assert out["ok"] is True
+    assert out["data"] == {"plate": None}
+
+
+def test_photo_license_vin_unread_is_warning_only():
+    out = check_photo("license_vin", item("license_vin"))
+    assert out["ok"] is True
+    assert out["data"] == {"vin": None}
+
+
+def test_photo_service_front_partial_needs_expected_vin():
+    out = check_photo("service_front", item("service_front", {"vin_partial": "603850"}))
+    assert out["ok"] is False
+
+
+def test_photo_service_front_partial_with_expected_vin_passes():
+    out = check_photo("service_front", item("service_front", {"vin_partial": "603850"}),
+                      expected_vin="HLC3J2VEXSA603850")
+    assert out["ok"] is True
+
+
+def test_photo_odometer_over_5pct_fails():
+    out = check_photo("odometer", item("odometer", {"odometer": 182}),
+                      expected_odometer=170)
+    assert out["ok"] is False
+
+
+def test_photo_filter_applicable_only_for_hande():
+    hande = check_photo("filter_has", item("filter_has", action="has"), axle_type="hande")
+    other = check_photo("filter_has", item("filter_has", action="has"))
+    assert hande["applicable"] is True
+    assert other["applicable"] is False

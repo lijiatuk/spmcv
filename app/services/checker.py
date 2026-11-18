@@ -27,6 +27,23 @@ REQUIREMENT_LABEL = {
 
 ACTION_LABEL = {"fill": "加油", "drain": "放油", "has": "有滤芯", "none": "无滤芯"}
 
+# 单个细分场景模式（scene + photo_type）用的映射。键必须与 classify 的 12 类 slug 一致。
+PHOTO_TYPES: dict[str, tuple[str, ...]] = {
+    "arrival": ("arrival_plate", "license_vin", "frame_vin", "odometer"),
+    "repair": ("bridge_drain", "bridge_fill", "tire_drain", "tire_fill",
+               "filter_none", "filter_has"),
+    "inspection": ("service_front", "service_sign"),
+}
+
+PHOTO_TYPE_LABEL = {
+    "arrival_plate": "车头及车牌", "license_vin": "行驶证VIN",
+    "frame_vin": "车架贴牌VIN", "odometer": "里程表",
+    "bridge_drain": "桥放油", "bridge_fill": "桥加油",
+    "tire_drain": "轮胎放油", "tire_fill": "轮胎加油",
+    "filter_none": "无滤芯", "filter_has": "有滤芯",
+    "service_front": "服务单首页", "service_sign": "服务单末页",
+}
+
 _VIN_BAD = re.compile(r"[^0-9A-Z]")
 _PLATE_BAD = re.compile(r"[^0-9A-Z\u4e00-\u9fa5]")
 
@@ -310,6 +327,137 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------- 单个细分场景 ----------------
+
+def photo_applicable(photo_type: str, axle_type: str = "") -> bool:
+    """该细分场景在当前桥型下是否属于必交项。
+
+    单张模式只校验“这张照片本身”，不因不适用而判失败；调用方看
+    ``applicable`` 决定要不要把它计入整单。
+    """
+    hande = str(axle_type or "").strip().lower() == "hande"
+    if photo_type in ("bridge_drain", "bridge_fill", "tire_drain", "tire_fill"):
+        return photo_type in (("bridge_fill",) if hande else
+                              ("bridge_drain", "bridge_fill", "tire_drain", "tire_fill"))
+    if photo_type in ("filter_none", "filter_has"):
+        return hande
+    return True
+
+
+def photo_data(photo_type: str, item: dict | None) -> dict:
+    """按细分场景提取对外的 data，字段与整单模式保持一致。"""
+    fields = _fields(item)
+    if photo_type == "arrival_plate":
+        return {"plate": norm_plate(fields.get("plate")) or None}
+    if photo_type in ("license_vin", "frame_vin"):
+        return {"vin": norm_vin(fields.get("vin")) or None}
+    if photo_type == "odometer":
+        return {"odometer": _as_float(fields.get("odometer"))}
+    if photo_type == "service_front":
+        return {"vin": norm_vin(fields.get("vin")) or None,
+                "vin_partial": norm_vin(fields.get("vin_partial")) or None}
+    if photo_type == "service_sign":
+        labels = _labels(item)
+        return {"signature": "signature" in labels, "stamp": "stamp" in labels}
+    if photo_type in ("bridge_drain", "bridge_fill", "tire_drain", "tire_fill"):
+        return {"action": _action(item)}
+    if photo_type in ("filter_none", "filter_has"):
+        return {"state": _action(item)}
+    return {}
+
+
+def _photo_result(ok: bool, message: str, data: dict, applicable: bool) -> dict:
+    return {"ok": bool(ok), "message": message, "data": data,
+            "applicable": bool(applicable)}
+
+
+def check_photo(photo_type: str, item: dict, *, expected_plate: str = "",
+                expected_vin: str = "", expected_odometer: float | None = None,
+                axle_type: str = "") -> dict:
+    """只校验一个细分场景的单张照片。
+
+    与整单 ``evaluate`` 的区别：不产生“缺少其它照片”的 missing；
+    跨图规则（两个 VIN 一致、至少一个 VIN 等）仍由整单模式负责。
+    """
+    data = photo_data(photo_type, item)
+    label = PHOTO_TYPE_LABEL.get(photo_type, photo_type)
+    applicable = photo_applicable(photo_type, axle_type)
+
+    if photo_type == "arrival_plate":
+        plate = data["plate"]
+        if plate and expected_plate and plate != norm_plate(expected_plate):
+            return _photo_result(False, f"车牌与工单不一致：{plate} ≠ {expected_plate}",
+                                 data, applicable)
+        message = (f"{label}：已识别车牌 {plate}" if plate
+                   else f"{label}：未识别到车牌，按规格跳过")
+    elif photo_type in ("license_vin", "frame_vin"):
+        vin = data["vin"]
+        if vin and expected_vin and vin != norm_vin(expected_vin):
+            return _photo_result(False, f"VIN 与工单不一致：{vin} ≠ {norm_vin(expected_vin)}",
+                                 data, applicable)
+        message = (f"{label}：已识别 VIN {vin}" if vin
+                   else f"{label}：未识别到 VIN，需另一张 VIN 照片兜底")
+    elif photo_type == "odometer":
+        odo = data["odometer"]
+        if odo is None:
+            message = f"{label}：未识别到里程"
+        elif expected_odometer:
+            diff = (abs(odo - expected_odometer) / expected_odometer * 100
+                    if expected_odometer else 0)
+            if diff > 5:
+                return _photo_result(
+                    False, f"里程与工单相差 {diff:.1f}%（>5%）：{odo} vs {expected_odometer}",
+                    data, applicable)
+            message = f"{label}：识别到 {odo} km"
+        else:
+            message = f"{label}：识别到 {odo} km"
+    elif photo_type == "service_front":
+        vin_full = data["vin"]
+        partial = data["vin_partial"]
+        want = norm_vin(expected_vin)
+        if vin_full:
+            if want and vin_full != want:
+                return _photo_result(False, f"VIN 与工单不一致：{vin_full} ≠ {want}",
+                                     data, applicable)
+            message = f"{label}：已识别 VIN {vin_full}"
+        elif partial:
+            if want and want.endswith(partial):
+                message = f"{label}：仅识别到尾段 {partial}，与工单 VIN 尾段匹配"
+            else:
+                return _photo_result(
+                    False, f"仅识别到尾段 {partial}，无法与工单完整 VIN 比对",
+                    data, applicable)
+        else:
+            return _photo_result(False, f"{label}：未识别到首页 VIN", data, applicable)
+    elif photo_type == "service_sign":
+        if not data["signature"] or not data["stamp"]:
+            missing = []
+            if not data["signature"]:
+                missing.append("客户签字")
+            if not data["stamp"]:
+                missing.append("服务站盖章")
+            return _photo_result(False, "未检测到" + "、".join(missing), data, applicable)
+        message = f"{label}：签字、盖章齐全"
+    elif photo_type in ("bridge_drain", "bridge_fill", "tire_drain", "tire_fill",
+                        "filter_none", "filter_has"):
+        wanted = {"bridge_drain": "drain", "bridge_fill": "fill",
+                  "tire_drain": "drain", "tire_fill": "fill",
+                  "filter_none": "none", "filter_has": "has"}[photo_type]
+        got = data.get("action") if "action" in data else data.get("state")
+        if got != wanted:
+            got_label = ACTION_LABEL.get(got or "", got or "未判定")
+            return _photo_result(
+                False, f"识别为「{got_label}」，不满足「{ACTION_LABEL[wanted]}」",
+                data, applicable)
+        message = f"{label}：{ACTION_LABEL[wanted]}"
+    else:
+        return _photo_result(False, f"未知 photo_type：{photo_type}", data, applicable)
+
+    if not applicable:
+        message += "（当前 axle_type 不要求该类型）"
+    return _photo_result(True, message, data, applicable)
 
 
 def evaluate(requirement: str, items: list[dict], *, expected_plate: str = "",
