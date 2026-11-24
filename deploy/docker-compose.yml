@@ -1,3 +1,7 @@
+# 项目名必须显式固定：服务器上同一个目录名 deploy 还跑着别的 compose 项目，
+# 靠目录名推断会撞项目名（曾把 ongrid 的容器当 orphan 删掉）。
+name: spmcv
+
 services:
   api:
     build:
@@ -21,12 +25,10 @@ services:
       # 单图分析硬超时。容器/跨网调用比裸机慢，先给 5s；
       # 在 L20 上用 bench_api --max-p95-ms 实测后再收紧。
       REQUEST_DEADLINE_S: ${REQUEST_DEADLINE_S:-5}
-      # 少图串行：并发会让 OCR 互相抢线程，出现「同样输入时好时坏」
-      SEQUENTIAL_PHOTOS: ${SEQUENTIAL_PHOTOS:-6}
       # 接口准入：并发满了快速 429，不排队到超时
-      MAX_CONCURRENT: ${MAX_CONCURRENT:-8}
-      ADMISSION_WAIT_S: ${ADMISSION_WAIT_S:-2}
-      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-48}
+      ADMISSION_WAIT_S: ${ADMISSION_WAIT_S:-1}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-600}
       API_KEYS: ${API_KEYS:-}
       # 训练设备：auto 会自动选 cuda / mps / cpu。CPU 训练慢，生产建议有卡时用 cuda。
       TRAIN_DEVICE: ${TRAIN_DEVICE:-auto}
@@ -97,6 +99,17 @@ services:
     environment:
       OCR_PROVIDER: rapidocr
       OCR_PLATE_SERVER: ${OCR_PLATE_SERVER:-1}
+      # 单张识别要在 5s 内返回：OCR 是唯一瓶颈（实测 8 并发≈串行）。
+      # 每个引擎只给 1 个 ONNX 线程，靠多进程/多线程扩并发，避免 16 套引擎互相抢核。
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OCR_WORKERS: ${OCR_WORKERS:-4}
+      OCR_BUDGET_S: ${OCR_BUDGET_S:-2.5}
+      OCR_PLATE_RETRY_S: ${OCR_PLATE_RETRY_S:-1.0}
+    # 4 进程 × 4 线程 = 16 个并发 OCR 引擎，够 32 并发请求用
+    command: ["uvicorn", "app.services.ocr_service:app",
+              "--host", "0.0.0.0", "--port", "8018", "--workers", "4"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8018/healthz')"]
       interval: 15s

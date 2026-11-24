@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -5,13 +7,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import analyze, categories, check, health, train, viz, workorder
+from app.api import analyze, health, recognize, train, viz
 from app import admission, obs, sso
 from app.config import settings
+from app.services import image_fetch
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # 预热 URL 下载客户端：把 SSL 上下文等一次性开销放在启动时
+    await image_fetch.warmup()
+    yield
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, version=settings.version)
+    app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -27,11 +37,10 @@ def create_app() -> FastAPI:
     app.include_router(sso.router)
     app.include_router(viz.router)
     app.include_router(train.router)
-    # 三类场景各一个接口，调用方按素材目录直接选
-    app.include_router(categories.router, prefix=settings.api_prefix)
-    app.include_router(check.router, prefix=settings.api_prefix)
+    # 对外唯一业务接口：单张图 + 12 个场景
+    app.include_router(recognize.router, prefix=settings.api_prefix)
+    # /v1/analyze 只给控制台和内部排查用，不对外承诺契约
     app.include_router(analyze.router, prefix=settings.api_prefix)
-    app.include_router(workorder.router, prefix=settings.api_prefix)
     @app.middleware("http")
     async def _no_cache_ui(request, call_next):
         """前端资源一律不缓存。

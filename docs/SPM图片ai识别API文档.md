@@ -1,223 +1,216 @@
-# SPM图片ai识别API文档
+# SPM 图片 AI 识别 API
 
-## 1. 请求说明
+版本 `3.0` · 单张识别 · 12 个细分场景 · 服务地址 `http://10.51.13.7:8020` · 更新 2026-11-20
+
+> 本文件是**唯一对外接口文档**。旧的 `/v1/arrival`、`/v1/repair`、`/v1/inspection`、
+> `/v1/scan`、`/v1/workorder`、`/v1/check`（多张）全部下线或转为内部接口，不在本文范围。
+
+---
+
+## 1. 接口概述
+
+一个接口、一张图、一个场景：
+
+```text
+POST /v1/recognize
+```
+
+- 传 **1 张图片**（文件或 URL）和 **1 个 `scene` 参数**；
+- 判定只看 **HTTP 状态码**：`200` = 本场景识别成功，`422` = 识别不成功；
+- 返回 `scene` / `message` / `data`，`data` 按场景给字段；
+- 没有 `ok`、`result`、`codes`、`boxes`、`photos[]`。
+
+**只做单张识别，不做工单比对、不做跨图校验。** 工单级规则（VIN 是否一致、四件套是否齐、
+汉德桥要哪些照片）由业务系统拿到单张结果后自行组合。
+
+---
+
+## 2. 请求
 
 ```http
-POST http://10.51.13.7:8020/v1/check
+POST http://10.51.13.7:8020/v1/recognize
 Content-Type: multipart/form-data
-
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| scene | string | 是 | arrival/ repair/ inspection |
-| images | file\[ \] | 是 | 该场景的全部照片 |
-| axle\_type | string | 否 | 仅 repair：`hande`\=汉德桥，其它或留空=非汉德桥 |
-| expected\_plate | string | 否 | 仅 arrival：工单车牌，传了且识别到才比对 |
-| expected\_vin | string | 否 | arrival / inspection：工单 VIN，传了才比对 |
-| expected\_odometer | number | 否 | 仅 arrival：工单里程，传了且识别到才比对，误差 >5% 不通过 |
-| photo\_type | string | 否 | 仅单张模式：指定一个细分场景，见 3.4；传了就不再要求同场景其它照片 |
+|---|---|---|---|
+| `scene` | string | 是 | 12 个场景之一，见第 3 节 |
+| `image` | file | 二选一 | 图片文件，jpeg / png / webp / tiff，≤15MB |
+| `image_url` | string | 二选一 | 图片 URL，服务端拉取；≤15MB，下载超时 3s |
 
-## 2. 接口响应
+`image` 与 `image_url` 必须传且只传一个。
 
-### 2.1响应成功
+---
+
+## 3. 12 个场景与返回字段
+
+| `scene` | 含义 | 200（识别成功）条件 | `data` 字段 |
+|---|---|---|---|
+| `arrival_plate` | 车头及车牌号 | 检测到车头且读到车牌 | `plate` |
+| `license_vin` | 行驶证 VIN | 读到 17 位 VIN | `vin` |
+| `frame_vin` | 车架贴牌 VIN | 读到 17 位 VIN | `vin` |
+| `odometer` | 里程表 | 读到总里程数字 | `odometer`（number） |
+| `bridge_drain` | 桥放油 | 判定为放油 | `action` = `"drain"` |
+| `bridge_fill` | 桥加油 | 判定为加油 | `action` = `"fill"` |
+| `tire_drain` | 轮胎放油 | 判定为放油 | `action` = `"drain"` |
+| `tire_fill` | 轮胎加油 | 判定为加油 | `action` = `"fill"` |
+| `filter_none` | 无滤芯 | 判定为无滤芯 | `filter_state` = `"none"` |
+| `filter_has` | 有滤芯 | 判定为有滤芯 | `filter_state` = `"has"` |
+| `service_front` | 服务单首页 VIN | 读到 VIN，或仅读到尾段且能定位 | `vin`, `vin_partial` |
+| `service_sign` | 服务单末页（签字+盖章） | 客户签字与服务站盖章**都**检测到 | `signature`, `stamp` |
+
+**车牌读不到 → 422**（不是 200）。这是与旧版本的关键差异。
+
+### 3.1 响应示例
+
+识别成功（HTTP 200）：
 
 ```json
 {
-  "scene": "arrival",
-  "message": "接车照片满足需求：四类照片齐全，VIN 校验通过",
-  "missing": [],
-  "data": {
-    "plate": "晋D08906D",
-    "vin": "HLC3J2VF9TA604594",
-    "odometer": 182
-  }
+  "scene": "arrival_plate",
+  "message": "识别成功",
+  "data": {"plate": "晋D08906D"}
 }
-
 ```
-
-### 2.2 响应失败
 
 ```json
 {
-  "scene": "repair",
-  "message": "缺少照片：桥加油",
-  "missing": ["桥加油"],
-  "data": {
-    "axle": "drain",
-    "tire": "drain+fill",
-    "filter": null
-  }
+  "scene": "bridge_fill",
+  "message": "识别成功",
+  "data": {"action": "fill"}
 }
-
 ```
 
-公共字段：
+```json
+{
+  "scene": "service_sign",
+  "message": "识别成功",
+  "data": {"signature": true, "stamp": true}
+}
+```
+
+识别不成功（HTTP 422）：
+
+```json
+{
+  "scene": "arrival_plate",
+  "message": "未识别到车牌，请重拍",
+  "data": {"plate": null}
+}
+```
+
+```json
+{
+  "scene": "service_sign",
+  "message": "未检测到服务站盖章",
+  "data": {"signature": true, "stamp": false}
+}
+```
+
+```json
+{
+  "scene": "odometer",
+  "message": "识别超时（>5s），请重拍或重试",
+  "data": {"odometer": null}
+}
+```
+
+### 3.2 字段说明
 
 | 字段 | 说明 |
-| --- | --- |
-| scene | 本次验收的场景 |
-| message | 一句话结论/原因，可直接给现场或业务看 |
-| missing | 缺少的照片类型（中文），通过时为空数组 |
-| data | 该场景的识别结果，字段见下表；没识别到的值为 null/ false |
+|---|---|
+| `scene` | 回显请求的场景 |
+| `message` | 一句话结论，可直接展示给现场/业务 |
+| `data` | 按场景返回；识别不到的值为 `null` / `false` |
 
-### 2.3 data按场景返回
+---
 
-| 场景 | 字段 | 值 |
-| --- | --- | --- |
-| `arrival` | `plate` | 车牌，未识别为 `null` |
-|  | `vin` | 采信的 VIN；两个 VIN 都读到且一致才有值，否则 `null` |
-|  | `odometer` | 里程读数，未识别为 `null` |
-| `repair` | `axle` | 桥的动作：`drain` / `fill` / `drain+fill` / `null` |
-|  | `tire` | 轮胎的动作：`drain` / `fill` / `drain+fill` / `null` |
-|  | `filter` | 滤芯状态：`none` / `has` / `none+has` / `null` |
-| `inspection` | `vin` | 首页完整 VIN，未读到为 `null` |
-|  | `vin_partial` | 只读到尾段时给尾段，否则 `null` |
-|  | `signature` | 是否检测到客户签字 |
-|  | `stamp` | 是否检测到服务站盖章 |
+## 4. 调用示例
 
-## 3. 接口明细说明
-
-### 3.1 接车 `scene=arrival`
-
-| 照片/检查 | 判定 |
-| --- | --- |
-| 车头及车牌 | 必须有车头照片；车牌读不到时**按规格跳过**车牌校验；读到且传了 `expected_plate` 才比对 |
-| 行驶证 VIN、车架 VIN | 两张照片都要有；**至少读到一个 VIN**；两个都读到必须一致；传了 `expected_vin` 才与工单比对 |
-| 里程表 | 必须有里程表照片；读出里程且传了 `expected_odometer` 才做 ±5% 比对；读不出里程不算失败 |
-
-### 3.2 维修 `scene=repair`
-
-| 桥型 | 必须有的照片 | 不判 |
-| --- | --- | --- |
-| 非汉德（`axle_type` 留空或其它） | 桥放油、桥加油、轮胎放油、轮胎加油 | 滤芯（上传了也忽略，不判失败） |
-| 汉德（`axle_type=hande`） | 桥加油、无滤芯、有滤芯 | 轮胎（上传了也忽略，不判失败） |
-
-### 3.3 检查表 `scene=inspection`
-
-| 照片/检查 | 判定 |
-| --- | --- |
-| 服务单首页 | 必须有；VIN 要能读到。完整 VIN 直接比对；只有尾段时，传了 `expected_vin` 且尾段能对上才算通过 |
-| 服务单末页 | 必须有；客户签字、服务站盖章都要检测到 |
-| 工单 VIN | 传了 `expected_vin` 才比对；不传只校验 VIN 是否存在 |
-
-### 3.4 单个细分场景 `photo_type`（可选）
-
-默认不传 `photo_type` 时，接口按整个场景验收，必须一次传齐 3.1–3.3 要求的照片。
-传了 `photo_type` 后进入“单个细分场景”模式：只校验这一张照片，不再要求同场景其它照片，`missing` 固定为 `[]`。
-
-| scene | photo_type 可选值 |
-| --- | --- |
-| `arrival` | `arrival_plate`、`license_vin`、`frame_vin`、`odometer` |
-| `repair` | `bridge_drain`、`bridge_fill`、`tire_drain`、`tire_fill`、`filter_none`、`filter_has` |
-| `inspection` | `service_front`、`service_sign` |
-
-规则：
-
-- `photo_type` 必须属于当前 `scene`，否则 422。
-- 该模式只接收 **1 张** 图片；0 张或大于 1 张返回 400。
-- 服务端会校验实际识别类别，和 `photo_type` 不一致时返回 422，并给出 `matched=false`、`actual_scene`。
-- 跨图规则（两个 VIN 是否一致、至少读到一个 VIN、整单照片是否齐全）仍由不传 `photo_type` 的整单模式负责。
-
-响应在公共字段外增加：
-
-| 字段 | 说明 |
-| --- | --- |
-| `photo_type` | 本次校验的细分场景 |
-| `matched` | 实际识别类别是否等于 `photo_type` |
-| `actual_scene` | 实际识别到的类别；未知为 `null` |
-| `applicable` | 当前 `axle_type` 下该照片是否属于必交项；仅 repair 可能出现 `false` |
-| `data` | 该细分场景的识别结果，按场景返回对应字段 |
-
-`data` 按 `photo_type` 返回：`arrival_plate` → `plate`；`license_vin` / `frame_vin` → `vin`；`odometer` → `odometer`；`service_front` → `vin` / `vin_partial`；`service_sign` → `signature` / `stamp`；桥/轮胎 → `action`；滤芯 → `state`。
-
-示例：只校验服务单首页
-
-```json
-{
-  "scene": "inspection",
-  "photo_type": "service_front",
-  "matched": true,
-  "actual_scene": "service_front",
-  "message": "服务单首页：已识别 VIN HLC3J2V13TA603182",
-  "missing": [],
-  "data": {
-    "vin": "HLC3J2V13TA603182",
-    "vin_partial": null
-  }
-}
-```
-
-传错细分场景：
-
-```json
-{
-  "scene": "inspection",
-  "photo_type": "service_front",
-  "matched": false,
-  "actual_scene": "service_sign",
-  "message": "这张图识别为服务单末页，不是服务单首页",
-  "missing": [],
-  "data": {
-    "signature": true,
-    "stamp": true
-  }
-}
-```
-
-`applicable=false` 表示照片本身有效，但当前 `axle_type` 不要求该类型；它仍返回 200，调用方不应把它计入整单必交项。最终是否通过，仍以不传 `photo_type` 的整单请求为准。
-
-单张模式的 200 表示“类型匹配，且这张照片自身没有硬性不通过”。车牌、VIN、里程按整单规格允许读不出的项，单张模式仍返回 200，`data` 对应字段为 `null`；整单是否可用仍由整单模式判断。
-
-## 4. 调用示例
+### 4.1 文件上传
 
 ```bash
-# 接车
-curl -X POST http://10.51.13.7:8020/v1/check \
-  -F "scene=arrival" \
-  -F "images=@plate.jpg" \
-  -F "images=@license.jpg" \
-  -F "images=@frame.jpg" \
-  -F "images=@odometer.jpg" \
-  -F "expected_plate=晋D08906D" \
-  -F "expected_vin=HLC3J2VF9TA604594" \
-  -F "expected_odometer=182"
-
-# 维修：汉德桥
-curl -X POST http://10.51.13.7:8020/v1/check \
-  -F "scene=repair" -F "axle_type=hande" \
-  -F "images=@axle_fill.jpg" -F "images=@filter_none.jpg" -F "images=@filter_has.jpg"
-
-# 检查表
-curl -X POST http://10.51.13.7:8020/v1/check \
-  -F "scene=inspection" \
-  -F "images=@front.jpg" -F "images=@sign.jpg" \
-  -F "expected_vin=HLC3J2V13TA603182"
-
-# 单个细分场景：只校验服务单首页，不要求末页
-curl -X POST http://10.51.13.7:8020/v1/check \
-  -F "scene=inspection" \
-  -F "photo_type=service_front" \
-  -F "images=@front.jpg" \
-  -F "expected_vin=HLC3J2V13TA603182"
-
+curl -X POST http://10.51.13.7:8020/v1/recognize \
+  -F "scene=arrival_plate" \
+  -F "image=@plate.jpg"
 ```
 
-## 5. 错误响应
+### 4.2 图片 URL
+
+```bash
+curl -X POST http://10.51.13.7:8020/v1/recognize \
+  -F "scene=license_vin" \
+  -F "image_url=https://your-oss.example.com/2026/11/20/xxx.jpg"
+```
+
+### 4.3 Python
+
+```python
+import requests
+
+def recognize(image_path: str, scene: str) -> dict | None:
+    with open(image_path, "rb") as f:
+        r = requests.post(
+            "http://10.51.13.7:8020/v1/recognize",
+            files={"image": f},
+            data={"scene": scene},
+            timeout=10,
+        )
+    body = r.json()
+    if r.status_code == 200:
+        return body["data"]
+    return None  # 422：识别失败，展示 body["message"] 让用户重拍
+```
+
+---
+
+## 5. 错误响应
+
+所有错误同一结构：
 
 ```json
-{
-  "scene": "arrival",
-  "message": "缺少 images 图片",
-  "missing": [],
-  "data": {}
-}
-
+{"scene": "odometer", "message": "识别超时（>5s），请重拍或重试", "data": {"odometer": null}}
 ```
 
-| HTTP | 场景 |
-| --- | --- |
-| 400 | 没传 images、图片为空或格式不支持；单张模式不是 1 张 |
-| 413 | 单张 >15MB 或总量 >80MB |
-| 422 | 业务不满足（缺照片/校验不通过）、photo_type 不属于 scene、识别类型不一致、参数不合法等 |
-| 500 | 内部异常，可重试 |
+| HTTP | 含义 | 上层动作 |
+|---|---|---|
+| 200 | 本场景识别成功 | 使用 `data` |
+| 422 | 识别不成功（未识别到目标字段 / 超时） | 提示重拍，展示 `message` |
+| 400 | 请求错误（缺 `scene`、缺图、格式不支持、URL 无法下载） | 修请求 |
+| 413 | 图片超过 15MB | 压缩后重传 |
+| 500 | 服务异常 | 重试 |
+
+---
+
+## 6. 性能与并发
+
+| 项 | 指标 |
+|---|---|
+| 单张响应时间 | **最大 5s**（硬截止，超时返回 422「识别超时」） |
+| 并发 | **目标 32 并发**，准入上限 48，超出返回 429 |
+| 单图大小 | ≤15MB |
+| 限流 | 单调用方 120 次/分钟（可按需调） |
+
+发生 `429` 时按响应头 `Retry-After` 退避重试。
+
+---
+
+## 7. 与业务系统的配合方式
+
+业务系统按现场流程，每次拍一张、调一次：
+
+```text
+接车：车头 → recognize(scene=arrival_plate) → 拿到车牌
+      行驶证 → recognize(scene=license_vin)   → 拿到 VIN
+      车架   → recognize(scene=frame_vin)     → 拿到 VIN
+      里程表 → recognize(scene=odometer)      → 拿到里程
+      业务系统自己判断：两个 VIN 是否一致、是否与工单一致
+
+维修：桥放油/桥加油/轮胎放油/轮胎加油/无滤芯/有滤芯
+      每张调对应 scene，拿到 action / filter_state
+
+检查表：首页 → recognize(scene=service_front) → 拿到 VIN
+        末页 → recognize(scene=service_sign)  → 拿到签字/盖章
+```
+
+**本接口不接收工单选填值**（车牌/VIN/里程都不比对）。工单比对在业务系统侧完成。

@@ -8,7 +8,7 @@
 - 当前运行版本 `v5.1.0`，场景模型 5 折按工单严格 OOF 为 **86.98% (1,136/1,306)**；新域 **82.21% (624/759)**。这反映当前目录标签的一致性，不等同于人工黄金集准确率或整单通过率。
 - API 融合默认关闭。当前辅助头与场景头版本未对齐；新的辅助头只作为候选训练，完成全部折外与整单验收前不激活。
 - 快速标注台按可见证据复核，支持 `other/uncertain`、证据/动作属性、备注、撤销、SQLite 审计和 CSV 导出。详细口径见 [`docs/labeling_guide_v1.md`](docs/labeling_guide_v1.md)。
-- 上线与日常迭代见 [`docs/上线方案.md`](docs/上线方案.md)；业务系统联调见 [`docs/上层调用接口文档.md`](docs/上层调用接口文档.md)；训练/验收/发布流程见 [`docs/model_lifecycle.md`](docs/model_lifecycle.md)，部署步骤见 [`deploy/README.md`](deploy/README.md)。
+- 上线与日常迭代见 [`docs/上线方案.md`](docs/上线方案.md)；业务系统联调见 [`docs/SPM图片ai识别API文档.md`](docs/SPM图片ai识别API文档.md)；训练/验收/发布流程见 [`docs/model_lifecycle.md`](docs/model_lifecycle.md)，部署步骤见 [`deploy/README.md`](deploy/README.md)。
 - 新旧数据、训练内目录回放、分组 OOF 和完整工单黄金集是不同口径；旧段落中的历史单折/规格图片数字不得当作当前 OOF 或生产 SLA。
 
 ## 1. 目录
@@ -18,7 +18,7 @@
 
 ```
 web/                        前端（独立目录，与 app 同级，可直接换框架）
-  console.html/css/js       控制台：总览 / 在线识别 / 模型版本 / 错误样本 / 标注
+  console.html/css/js       控制台：识别测试（单张 + 12 场景）
   sso.js                    统一登录接入（默认关闭）
   simple.html               极简单页（内部排查用）
 
@@ -108,42 +108,52 @@ MAX_CONCURRENT=4 \
 
 ## 6. API
 
-**对外功能验收：一个入口 + 场景参数。** 判定只看 HTTP 状态码：`200` = 需求满足，`422` = 不满足。
+**对外只有一个接口：单张图 + 12 个场景参数。**
 
 ```bash
-curl -X POST http://127.0.0.1:8017/v1/check \
-  -F "scene=arrival" \
-  -F "images=@plate.jpg" -F "images=@license.jpg" \
-  -F "images=@frame.jpg" -F "images=@odometer.jpg" \
-  -F "expected_plate=晋D08906D" \
-  -F "expected_vin=HLC3J2VF9TA604594" -F "expected_odometer=182"
+curl -X POST http://127.0.0.1:8017/v1/recognize \
+  -F "scene=arrival_plate" \
+  -F "image=@plate.jpg"
+
+# 也支持图片 URL
+curl -X POST http://127.0.0.1:8017/v1/recognize \
+  -F "scene=license_vin" \
+  -F "image_url=https://your-oss.example.com/xxx.jpg"
 ```
 
-响应固定四个字段：`scene` / `message` / `missing` / `data`，**没有 `ok` / `result` / `codes` / `boxes`**。
-`data` 按场景返回：接车 `plate`/`vin`/`odometer`；维修 `axle`/`tire`/`filter`；检查表 `vin`/`vin_partial`/`signature`/`stamp`。
-`expected_*` 可选，传了才与工单比对。
+判定只看 HTTP 状态码：**`200` = 本场景识别成功，`422` = 不成功**（看 `message`，让用户重拍）。
+响应只有 `scene` / `message` / `data`，`data` 按场景给字段（车牌、VIN、里程、动作、签字盖章）。
+**只做识别，不传工单值、不做工单比对。**
 
-三个场景路径是等价别名，返回完全一样：
+12 个场景：`arrival_plate`、`license_vin`、`frame_vin`、`odometer`、
+`bridge_drain`、`bridge_fill`、`tire_drain`、`tire_fill`、
+`filter_none`、`filter_has`、`service_front`、`service_sign`。
 
-```text
-POST /v1/check/arrival
-POST /v1/check/repair
-POST /v1/check/inspection
+完整字段、错误码、URL 输入说明见 [`docs/SPM图片ai识别API文档.md`](docs/SPM图片ai识别API文档.md)；
+性能目标（32 并发 / 3s）与改造清单见 [`docs/reports/final_plan_20261120.md`](docs/reports/final_plan_20261120.md)。
+
+> **状态（2026-11-20 v3.0）**：`/v1/recognize` 已实现，本地端到端验证通过；
+> 打包部署见 [部署更新手册](docs/部署更新手册.md)。多张/阶段接口已从代码移除。
+
+保留的运维接口：`/v1/meta`、`/healthz`、`/readyz`、`/metrics`、`/docs`。
+
+上传限制：单图 ≤15MB，按 magic bytes 判格式（不信扩展名）；准入并发与限流见 `/v1/meta`。
+
+
+## 打包与更新
+
+```bash
+# 开发机：打升级包（默认，约 70MB）
+bash deploy/package.sh
+
+# 增量包（只含改动，几十 KB）
+bash deploy/package.sh --since <git-ref>
+
+# 服务器：上传包后一条命令更新（构建 → 重启 → 健康检查 → 契约验收）
+cd /opt/spmcv && bash deploy/update.sh /root/<包名>.tar.gz
 ```
 
-完整字段、Excel 需求对照、错误码见 [`docs/上层调用接口文档.md`](docs/上层调用接口文档.md)。
-
-以下路径保留给控制台/内部排查，返回结构不是对外契约：
-`/v1/arrival`、`/v1/repair`、`/v1/inspection`、`/v1/scan`、`/v1/workorder`、`/v1/analyze`。
-
-- `/v1/meta`：版本、模型、并发与上传限制
-- `/metrics`：请求数、错误、在途、P50/P95
-- `/healthz` / `/readyz`：存活 / 下游就绪
-- `/docs`：OpenAPI
-
-上传限制：单图 ≤15MB、单请求 ≤20 张 / 80MB、像素 ≤5000 万，按 magic bytes 判格式（不信扩展名）；
-准入默认 8 并发、120 次/分钟。
-
+详见 [docs/部署更新手册.md](docs/部署更新手册.md)。
 
 ## 7. 给别人验收（局域网）
 

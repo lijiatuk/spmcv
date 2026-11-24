@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""对**运行中的服务**做接口契约检查（不是单元测试）。
+"""对运行中的服务做**对外契约**检查（上层接入/上线前必跑）。
 
-上层系统接入前跑一遍，确认文档里写的和实际返回的一致：
-  - 错误结构统一（code/message/request_id）
-  - result 取值合法、codes 是机器码
-  - 每张图带 model_version，能发现"切了模型但没重启"
-  - 请求 ID 原样回传
-  - 参数非法时给 422 而不是 500
+当前契约（v3.0）：只有一个业务接口 `POST /v1/recognize`，单张图 + `scene`。
 
-    python scripts/contract_check.py --base http://127.0.0.1:8017 --photo data/x.png
-退出码非 0 表示契约不符，可直接接进 CI 或部署门禁。
+    python scripts/contract_check.py --base http://127.0.0.1:8020 \\
+        --scene arrival_plate --photo data/external/spec/01_车头及车牌号/spec_image1.png
+
+退出码非 0 表示契约不符。
 """
 from __future__ import annotations
 
@@ -22,6 +19,8 @@ import httpx
 
 PASS, FAIL = "✅", "❌"
 failures: list[str] = []
+RETIRED = ("/v1/scan", "/v1/arrival", "/v1/repair", "/v1/inspection",
+           "/v1/workorder", "/v1/check", "/v1/check/arrival")
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -32,7 +31,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="http://127.0.0.1:8017")
+    ap.add_argument("--base", default="http://127.0.0.1:8020")
+    ap.add_argument("--scene", default="arrival_plate")
     ap.add_argument("--photo", required=True)
     ap.add_argument("--api-key", default="")
     args = ap.parse_args()
@@ -40,74 +40,71 @@ def main() -> int:
     base = args.base.rstrip("/")
     photo = Path(args.photo)
     headers = {"X-API-Key": args.api_key} if args.api_key else {}
+    client = httpx.Client(base_url=base, headers=headers, timeout=60)
     rid = uuid.uuid4().hex
-    client = httpx.Client(base_url=base, headers=headers, timeout=180)
-    files = {"images": (photo.name, photo.read_bytes(), "image/png")}
 
     print(f"契约检查 → {base}\n")
 
     print("[基础]")
     h = client.get("/healthz")
     check("/healthz 200", h.status_code == 200)
-    check("/healthz 有 ok/version", {"ok", "version"} <= set(h.json() or {}))
     r = client.get("/readyz")
     body = r.json() or {}
     check("/readyz 有 vision/ocr", {"vision", "ocr"} <= set(body))
-    check("vision.model_version 非空", bool((body.get("vision") or {}).get("model_version")),
-          str(body.get("vision")))
+    check("vision.model_version 非空", bool((body.get("vision") or {}).get("model_version")))
 
     print("\n[契约声明]")
     meta = client.get("/v1/meta").json() or {}
     contract = meta.get("contract") or {}
     check("api_version 存在", bool(contract.get("api_version")))
-    check("taxonomy_version 存在", bool(contract.get("taxonomy_version")))
-    check("result 取值含 pass/partial/review",
-          set(contract.get("result_values") or []) >= {"pass", "partial", "review"},
-          str(contract.get("result_values")))
+    check("单张契约 single_image", contract.get("single_image") is True)
+    check("场景数 12", contract.get("scene_count") == 12)
+    check("响应字段 scene/message/data",
+          contract.get("response_fields") == ["scene", "message", "data"])
+
+    print("\n[接口枚举]")
+    scenes = client.get("/v1/scenes").json()
+    names = {row["scene"] for row in scenes.get("scenes", [])}
+    check("12 个 scene", len(names) == 12, str(len(names)))
+    check("包含 arrival_plate 与 service_sign",
+          {"arrival_plate", "service_sign"} <= names)
 
     print("\n[正常调用]")
-    r = client.post("/v1/scan", files=files, headers={"X-Request-Id": rid})
-    check("HTTP 200", r.status_code == 200, f"{r.status_code}")
+    r = client.post("/v1/recognize",
+                    files={"image": (photo.name, photo.read_bytes(), "image/png")},
+                    data={"scene": args.scene},
+                    headers={"X-Request-Id": rid})
+    check("HTTP 200 或 422", r.status_code in (200, 422), str(r.status_code))
     check("回传 X-Request-Id", r.headers.get("x-request-id") == rid,
           r.headers.get("x-request-id", ""))
     d = r.json() or {}
-    check("result 合法", d.get("result") in {"pass", "partial", "review"}, str(d.get("result")))
-    check("codes 是字符串数组", isinstance(d.get("codes"), list)
-          and all(isinstance(c, str) for c in d.get("codes", [])))
-    check("codes 是机器码（无中文）",
-          all(not any("\u4e00" <= ch <= "\u9fff" for ch in c) for c in d.get("codes", [])),
-          str(d.get("codes")))
-    photos = d.get("photos") or []
-    check("photos 非空", bool(photos))
-    if photos:
-        p = photos[0]
-        check("每张图带 model_version", bool(p.get("model_version")), str(p.get("model_version")))
-        check("每张图带 scene/confidence/index",
-              {"scene", "confidence", "index"} <= set(p))
+    check("响应只有 scene/message/data", set(d) == {"scene", "message", "data"}, str(set(d)))
+    check("scene 回显", d.get("scene") == args.scene, str(d.get("scene")))
+    check("message 非空", bool(d.get("message")))
+    check("data 是对象", isinstance(d.get("data"), dict))
 
-    print("\n[工单比对]")
-    r2 = client.post("/v1/scan", files=files,
-                     data={"category": "arrival", "expected_plate": "京A00000"})
-    d2 = r2.json() or {}
-    check("车牌不符时 result=review", d2.get("result") == "review", str(d2.get("result")))
-    check("给出 PLATE_MISMATCH 映射或相关码",
-          any(c in d2.get("codes", []) for c in ("PLATE_MISMATCH", "VIN_MISMATCH"))
-          or bool(d2.get("plate")) is False,
-          str(d2.get("codes")))
+    print("\n[参数错误]")
+    e = client.post("/v1/recognize",
+                    files={"image": ("a.png", photo.read_bytes(), "image/png")},
+                    data={"scene": "not_a_scene"})
+    check("非法 scene 400", e.status_code == 400, str(e.status_code))
 
-    print("\n[错误结构]")
-    e = client.post("/v1/scan")
-    check("缺参数返回 422", e.status_code == 422, str(e.status_code))
-    eb = e.json() or {}
-    check("错误体含 code/message/request_id", {"code", "message"} <= set(eb), str(eb)[:120])
+    e = client.post("/v1/recognize", data={"scene": args.scene})
+    check("缺图片 400", e.status_code == 400, str(e.status_code))
 
-    bad = client.post("/v1/scan", files={"images": ("x.txt", b"not an image", "text/plain")})
-    check("非图片返回 400/413", bad.status_code in (400, 413), str(bad.status_code))
-    check("错误体仍是统一结构", {"code", "message"} <= set(bad.json() or {}))
+    e = client.post("/v1/recognize",
+                    files={"image": ("a.txt", b"not an image", "text/plain")},
+                    data={"scene": args.scene})
+    check("非图片 400", e.status_code == 400, str(e.status_code))
 
-    nf = client.get("/v1/definitely-not-a-route")
-    check("未知路由 404", nf.status_code == 404)
-    check("404 也是统一结构", {"code", "message", "request_id"} <= set(nf.json() or {}))
+    e = client.post("/v1/recognize", data={"scene": args.scene,
+                                           "image_url": "file:///etc/passwd"})
+    check("非 http URL 400", e.status_code == 400, str(e.status_code))
+
+    print("\n[已下线接口]")
+    for retired in RETIRED:
+        resp = client.post(retired, files={"images": ("a.png", b"x", "image/png")})
+        check(f"{retired} 已下线（404）", resp.status_code == 404, str(resp.status_code))
 
     print()
     if failures:

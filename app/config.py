@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", extra="ignore")
 
     app_name: str = "SPM Vision API"
-    version: str = "2.1"
+    version: str = "3.0"
     api_prefix: str = "/v1"
 
     vision_url: str = "http://127.0.0.1:8016"
@@ -25,24 +25,20 @@ class Settings(BaseSettings):
     # 末页签字/盖章兜底：本地检测器缺项且 VLX_URL 可达时，调 VLX 补一次。
     # 只影响 service_sign，不改变其它场景的判定链路。
     vlx_sign_fallback: bool = True
-    max_concurrent: int = 4
+    max_concurrent: int = 48
     # 分级超时：120s 一把梭会让一个慢 OCR 挂满连接池
     scene_timeout: float = 5.0
     detect_timeout: float = 10.0
-    ocr_timeout: float = 15.0
-    service_timeout: float = 20.0       # 兜底
+    # 对外承诺：单张识别 P95 < 5s。这个值同时是接口硬截止和 OCR 预算上限。
+    ocr_timeout: float = 6.0
+    service_timeout: float = 5.0        # 兜底
     readiness_timeout: float = 2.0      # /readyz 探测下游
 
-    # 上传限制
+    # 上传限制（单张）
     max_image_bytes: int = 15 * 1024 * 1024
-    max_total_bytes: int = 80 * 1024 * 1024
     max_pixels: int = 50_000_000
-    max_photos: int = 20
-    # 这个张数以内逐张串行分析，保证结果可复现；超过才并发。
-    # 实测并发会让 OCR 互相抢线程，出现「同样输入时好时坏」。
-    sequential_photos: int = 6
-    # 准入控制：并发满了快速返回 429，而不是排队到超时
-    admission_wait_s: float = 2.0
+    # 准入控制：32 并发是业务目标，上限给到 48 留余量；满了快速 429
+    admission_wait_s: float = 1.0
     rate_limit_per_min: int = 120
 
     # 融合开关：关掉后只用 12 类场景头的结论，不做分组覆盖与动作头纠偏。
@@ -63,7 +59,7 @@ class Settings(BaseSettings):
     # 实测：单张行驶证 2.7s；两张并发互相抢 OCR 会到 5s+，所以上限给到 8s，
     # 否则多图请求会整批降级成 TIMEOUT。产品目标是 P95 ≤ 2s，
     # 那个要在 L20 上用 bench_api --max-p95-ms 2.0 实测后再收紧。
-    request_deadline_s: float = 8.0
+    request_deadline_s: float = 5.0
 
     api_keys: str = ""
 

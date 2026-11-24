@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from PIL import Image
 
-from app.services.watermark import detect, strip
+from app.services.watermark import cv2, detect, strip
+
+pytestmark = pytest.mark.skipif(cv2 is None, reason="需要 opencv（rapidocr 依赖）")
 
 
 def solid(w, h, rgb):

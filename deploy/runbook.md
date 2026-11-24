@@ -1,5 +1,10 @@
 # 服务器部署手册（Linux + L20）
 
+> **接口（2026-11-20 v3.0）**：对外只有单张 `POST /v1/recognize` + 12 个 `scene`，
+> 见 [SPM图片ai识别API文档.md](../docs/SPM图片ai识别API文档.md)。多张/阶段接口已下线。
+> 打包与更新见 [部署更新手册.md](../docs/部署更新手册.md)。
+
+
 ## 0. 前置
 
 | 项 | 要求 |
@@ -72,14 +77,14 @@ SAMPLE_IMAGE=data/<车牌图>.png bash deploy/smoke_compose.sh
 bash deploy/verify.sh http://127.0.0.1:8020 data/<任一车牌图>.png
 ```
 
-它会检查 `/healthz`、`/readyz`、运行中的模型版本、契约版本，并真跑一次 `/v1/check/arrival`，
+它会检查 `/healthz`、`/readyz`、运行中的模型版本、契约版本，并真跑一次 `/v1/recognize`，
 任何一项不对直接返回非 0。
 
 手工跑一次真实识别（这是唯一能证明"整条链路通了"的检查）：
 
 ```bash
-code=$(curl -s -o /tmp/check.json -w '%{http_code}' -X POST localhost:8020/v1/check/arrival \
-  -F "images=@data/<任一车牌图>.png")
+code=$(curl -s -o /tmp/check.json -w '%{http_code}' -X POST localhost:8020/v1/recognize \
+  -F "scene=arrival_plate" -F "image=@data/<任一车牌图>.png")
 cat /tmp/check.json
 ```
 
@@ -89,7 +94,7 @@ cat /tmp/check.json
 压测（在服务器上做，笔记本数字不作数）：
 
 ```bash
-python scripts/bench_api.py --path /v1/check/arrival \
+python scripts/bench_api.py --scene arrival_plate \
   --image <车牌图> --vus 2 --requests 40 --max-p95-ms 2000
 ```
 
@@ -120,7 +125,7 @@ docker compose -f deploy/docker-compose.yml restart vision
 |---|---|---|
 | `/readyz` 里 vision 不 ok | 容器没拿到 GPU / 权重缺失 | `docker logs <vision>`，确认 `manifest 校验通过` |
 | 所有请求返回 401 | 开了 `API_KEYS` 但调用方没带 `X-API-Key` | 补头，或清空 `API_KEYS` |
-| `/v1/check` 长时间无响应或返回 500 | 单图超过 `REQUEST_DEADLINE_S` 或下游不可用 | 调大该变量，或查 GPU/OCR 是否被别的进程占用 |
+| `/v1/recognize` 长时间无响应或返回 500 | 单图超过 `REQUEST_DEADLINE_S` 或下游不可用 | 调大该变量，或查 GPU/OCR 是否被别的进程占用 |
 | 精度和报告差很多 | `models/current` 指向的版本不对 | `/v1/meta` 看 `model.designed_version`，`/readyz` 看实际加载版本 |
 
 ## 6. 从平台发起训练

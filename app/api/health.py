@@ -74,10 +74,10 @@ def meta():
         "contract": {
             "api_version": "v1",
             "taxonomy_version": "v1",
-            # 对外唯一结论字段 result 的取值；partial 仅 arrival 会出现
-            "result_values": ["pass", "partial", "review"],
-            "machine_codes": True,
-            "model_version_in_photo_result": True,
+            # 对外只有单张识别：HTTP 200 = 识别成功，422 = 不成功
+            "single_image": True,
+            "scene_count": 12,
+            "response_fields": ["scene", "message", "data"],
             "auxiliary_fusion_enabled": settings.enable_fusion,
         },
         "model": {
@@ -85,14 +85,12 @@ def meta():
             "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             if manifest_path.is_file() else None,
             "configured_roles": sorted((model_manifest.get("roles") or {}).keys()),
-            "runtime_version_confirmed_per_photo": True,
         },
         "limits": {
             "max_concurrent": settings.max_concurrent,
-            "max_photos": settings.max_photos,
             "max_image_mb": settings.max_image_bytes // (1024 * 1024),
-            "max_total_mb": settings.max_total_bytes // (1024 * 1024),
-            "service_timeout_s": settings.service_timeout,
+            "request_deadline_s": settings.request_deadline_s,
+            "admission_wait_s": settings.admission_wait_s,
         },
         "use_vlx": settings.use_vlx,
         "kev_mode": settings.kev_mode,

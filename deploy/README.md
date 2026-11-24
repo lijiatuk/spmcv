@@ -19,7 +19,7 @@ docker compose -f deploy/docker-compose.yml config --quiet
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-访问 `http://<服务器IP>:8020/ui/console.html`。API 文档在 `/docs`，业务联调说明见 [`docs/上层调用接口文档.md`](../docs/上层调用接口文档.md)，完整上线流程见 [`docs/上线方案.md`](../docs/上线方案.md)，状态端点是 `/healthz` 和 `/readyz`。
+访问 `http://<服务器IP>:8020/ui/console.html`。API 文档在 `/docs`，业务联调说明见 [`docs/SPM图片ai识别API文档.md`](../docs/SPM图片ai识别API文档.md)，完整上线流程见 [`docs/上线方案.md`](../docs/上线方案.md)，状态端点是 `/healthz` 和 `/readyz`。
 
 API 容器挂载 `data/`、`docs/`、`models/`、`var/`；其中 **api 的 `models/` 必须可写**（切版本、删版本要写 registry/current），vision 的 `models/` 保持只读。数据与反馈库在容器重建后保留。上传总量上限是 80 MiB，Nginx 留有 multipart 余量。
 

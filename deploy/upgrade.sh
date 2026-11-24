@@ -10,7 +10,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE="docker compose -f $ROOT/deploy/docker-compose.yml"
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-spmcv}"
+COMPOSE="docker compose -p $COMPOSE_PROJECT_NAME -f $ROOT/deploy/docker-compose.yml"
 cd "$ROOT"
 
 BUILD_SCOPE="api nginx"
@@ -49,7 +50,7 @@ else
 fi
 
 say "启动 / 更新容器"
-$COMPOSE up -d --remove-orphans
+$COMPOSE up -d
 
 say "等待 /healthz"
 for i in $(seq 1 60); do

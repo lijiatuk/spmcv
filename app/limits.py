@@ -50,19 +50,3 @@ async def read_image(upload: UploadFile) -> bytes:
         raise HTTPException(413, f"单张图片超过 {limit_mb}MB：{upload.filename or '未命名'}")
     sniff_image(data)
     return data
-
-
-async def read_images(uploads: list[UploadFile]) -> list[bytes]:
-    """读取一组上传图，同时限制单张与总量。"""
-    if len(uploads) > settings.max_photos:
-        raise HTTPException(400, f"单个工单最多 {settings.max_photos} 张照片")
-    out: list[bytes] = []
-    total = 0
-    for upload in uploads:
-        data = await read_image(upload)
-        total += len(data)
-        if total > settings.max_total_bytes:
-            limit_mb = settings.max_total_bytes // (1024 * 1024)
-            raise HTTPException(413, f"本单图片总量超过 {limit_mb}MB")
-        out.append(data)
-    return out

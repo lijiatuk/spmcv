@@ -2,7 +2,7 @@ PY := conda run --no-capture-output -n spmcv python
 DATA := data/processed/v5
 RAW  := data/raw/recut
 
-.PHONY: install data heads eval eval-oof eval-aux-oof train-scene-candidate eval-scene eval-categories labels-preview bench-api serve lan test up down models models-verify fmt
+.PHONY: install data heads eval eval-oof eval-aux-oof train-scene-candidate eval-recognize labels-preview bench serve lan test up down upgrade models models-verify contract-check package update fmt
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -37,17 +37,14 @@ train-scene-candidate:
 labels-preview:
 	$(PY) scripts/apply_relabel.py
 
-## 本地有界 multipart 压测示例：make bench-api ARGS='--image photo.jpg --vus 2 --requests 20'
-bench-api:
+## 单张识别压测：make bench ARGS='--scene arrival_plate --image a.jpg --vus 32 --requests 320'
+bench:
 	$(PY) scripts/bench_api.py $(ARGS)
 
-## 接口级场景精度：逐张调 /v1/analyze，对目录标签
-eval-scene:
-	$(PY) scripts/eval_api_scene.py --fold 0 --out docs/reports/eval_api_scene.json
-
-## 三类接口的端到端验证（归错类率 / 动作准确率 / 完整率）
-eval-categories:
-	$(PY) scripts/eval_categories.py --fold all --out docs/reports/eval_categories.json
+## 12 场景识别评测（规格样例）：make eval-recognize BASE=http://127.0.0.1:8020
+eval-recognize:
+	$(PY) scripts/eval_recognize.py --base "$${BASE:-http://127.0.0.1:8020}" \
+		--spec-dir data/external/spec --out docs/reports/eval_recognize.json
 
 serve:
 	bash scripts/serve_dev.sh
@@ -61,7 +58,8 @@ test:
 
 ## 接口契约检查：对运行中的服务验证对外契约（上层接入前必跑）
 contract-check:
-	$(PY) scripts/contract_check.py --photo "$${PHOTO:?用法: make contract-check PHOTO=路径}"
+	$(PY) scripts/contract_check.py --base "$${BASE:-http://127.0.0.1:8020}" \
+		--scene "$${SCENE:-arrival_plate}" --photo "$${PHOTO:?用法: make contract-check PHOTO=路径}"
 
 ## 浏览器回归：真实 Chrome 点一遍控制台（需要服务已启动）
 ui-test:
